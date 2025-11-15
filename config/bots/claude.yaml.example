@@ -15,6 +15,7 @@ topP: 1.0
 recencyWindowMessages: 400  # Optional: Max messages to include
 recencyWindowCharacters: 100000  # Optional: Max characters to include
 # When both specified, whichever limit is reached first is used
+hardMaxCharacters: 500000  # Hard limit never exceeded (prevents API errors), defaults to 500k (~140k tokens)
 rollingThreshold: 50  # Roll context after this many new messages
 recentParticipantCount: 10  # Number of recent participants for stop sequences
 authorizedRoles: []  # Roles authorized for .history commands (empty = all allowed)
@@ -56,7 +57,7 @@ discordBackoffMax: 32000  # Max backoff in ms for Discord API
 # systemPrompt: "You are a helpful assistant."
 
 # Misc
-replyOnRandom: 0  # Random reply probability (0-1000000)
-replyOnName: false  # Reply when name is mentioned
+replyOnRandom: 500  # Random reply: 1/N chance per message (default 500 = 0.2% chance)
+replyOnName: false  # Reply when name is mentioned (not yet implemented)
 maxQueuedReplies: 1  # Max queued replies before dropping
 

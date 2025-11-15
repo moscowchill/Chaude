@@ -179,14 +179,14 @@ export class ContextBuilder {
     const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0)
     
     // Hard maximum to prevent API errors (never exceed this)
-    // Conservative: ~500k chars = ~140k tokens (well under 200k limit)
-    const HARD_MAX_CHARACTERS = 500000
+    // Default: 500k chars = ~140k tokens (well under 200k limit)
+    const hardMaxCharacters = config.hardMaxCharacters || 500000
     
     // Check hard maximum first - always enforce this
-    if (totalChars > HARD_MAX_CHARACTERS) {
+    if (totalChars > hardMaxCharacters) {
       logger.warn({
         totalChars,
-        hardMax: HARD_MAX_CHARACTERS,
+        hardMax: hardMaxCharacters,
         messageCount: messages.length
       }, 'HARD LIMIT EXCEEDED - Forcing truncation')
       
@@ -195,7 +195,7 @@ export class ContextBuilder {
       let cutoffIndex = messages.length
       for (let i = messages.length - 1; i >= 0; i--) {
         keptChars += messages[i]!.content.length
-        if (keptChars > HARD_MAX_CHARACTERS) {
+        if (keptChars > hardMaxCharacters) {
           cutoffIndex = i + 1
           break
         }
