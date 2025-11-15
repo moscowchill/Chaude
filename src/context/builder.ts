@@ -266,16 +266,20 @@ export class ContextBuilder {
     // Create image lookup
     const imageMap = new Map(images.map((img) => [img.url, img]))
     
-    // Track image count to enforce maxImages limit
+    // Track image count and total base64 payload size to stay under API limits
+    // Anthropic has ~10MB total request limit, we want to keep images under 3-4MB
     let imageCount = 0
+    let totalBase64Size = 0
     const maxImages = config.maxImages || 5
+    const maxTotalBase64Bytes = 3 * 1024 * 1024  // 3 MB total base64 data for images
     
     logger.debug({
       messageCount: messages.length,
       cachedImages: images.length,
       imageUrls: images.map(i => i.url),
       includeImages: config.includeImages,
-      maxImages
+      maxImages,
+      maxTotalImageMB: maxTotalBase64Bytes / 1024 / 1024
     }, 'Starting formatMessages with images')
 
     for (const msg of messages) {
@@ -289,41 +293,58 @@ export class ContextBuilder {
         })
       }
 
-      // Add image content (if enabled and within limit)
+      // Add image content (if enabled and within limits)
       if (config.includeImages && msg.attachments.length > 0 && imageCount < maxImages) {
         logger.debug({ messageId: msg.id, attachments: msg.attachments.length }, 'Processing attachments for message')
         
         for (const attachment of msg.attachments) {
           if (imageCount >= maxImages) {
-            logger.debug({ maxImages, currentCount: imageCount }, 'Reached maxImages limit, skipping remaining images')
+            logger.debug({ maxImages, currentCount: imageCount }, 'Reached maxImages count limit, skipping remaining images')
             break
           }
           
           if (attachment.contentType?.startsWith('image/')) {
             const cached = imageMap.get(attachment.url)
-            logger.debug({ 
-              url: attachment.url, 
-              cached: !!cached,
-              inMap: imageMap.has(attachment.url),
-              mapSize: imageMap.size,
-              currentImageCount: imageCount
-            }, 'Looking up cached image')
             
             if (cached) {
+              const base64Data = cached.data.toString('base64')
+              const base64Size = base64Data.length
+              
+              // Check if adding this image would exceed total size limit
+              if (totalBase64Size + base64Size > maxTotalBase64Bytes) {
+                logger.warn({ 
+                  currentTotalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
+                  imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
+                  maxTotalMB: (maxTotalBase64Bytes / 1024 / 1024).toFixed(1),
+                  imageCount,
+                  url: attachment.url
+                }, 'Skipping image - would exceed total size limit')
+                break  // Stop adding more images
+              }
+              
+              logger.debug({ 
+                url: attachment.url, 
+                imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
+                currentImageCount: imageCount,
+                currentTotalMB: (totalBase64Size / 1024 / 1024).toFixed(2)
+              }, 'Adding image to content')
+              
               content.push({
                 type: 'image',
                 source: {
                   type: 'base64',
-                  data: cached.data.toString('base64'),
+                  data: base64Data,
                   media_type: cached.mediaType,  // Anthropic API uses snake_case
                 },
               })
               imageCount++
+              totalBase64Size += base64Size
+              
               logger.debug({ 
                 messageId: msg.id, 
-                imageSize: cached.data.length, 
                 imageCount, 
-                maxImages 
+                maxImages,
+                totalImageMB: (totalBase64Size / 1024 / 1024).toFixed(2)
               }, 'Added image to content')
             }
           }
