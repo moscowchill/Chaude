@@ -137,11 +137,11 @@ export class AgentLoop {
 
   private async replaceMentions(text: string, messages: any[]): Promise<string> {
     // Build username -> user ID mapping from recent messages
+    // Use actual username (not displayName) for chapter2 compatibility
     const userMap = new Map<string, string>()
     
     for (const msg of messages) {
       if (msg.author && !msg.author.bot) {
-        userMap.set(msg.author.displayName, msg.author.id)
         userMap.set(msg.author.username, msg.author.id)
       }
     }

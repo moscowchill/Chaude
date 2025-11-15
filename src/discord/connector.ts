@@ -558,10 +558,10 @@ export class DiscordConnector {
 
   private convertMessage(msg: Message, messageMap?: Map<string, Message>): DiscordMessage {
     // Replace user ID mentions with username mentions for bot consumption
+    // Use actual username (not displayName/nick) to match chapter2 behavior
     let content = msg.content
     for (const [userId, user] of msg.mentions.users.entries()) {
-      const displayName = msg.guild?.members.cache.get(userId)?.displayName || user.username
-      content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `<@${displayName}>`)
+      content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `<@${user.username}>`)
     }
     
     // If this is a reply (and not from a bot), prepend <reply:@username>
@@ -569,7 +569,7 @@ export class DiscordConnector {
       // Look up the referenced message to get the author name
       const referencedMsg = messageMap?.get(msg.reference.messageId)
       if (referencedMsg) {
-        const replyToName = referencedMsg.member?.displayName || referencedMsg.author.username
+        const replyToName = referencedMsg.author.username
         content = `<reply:@${replyToName}> ${content}`
         logger.debug({ 
           messageId: msg.id, 
@@ -589,7 +589,7 @@ export class DiscordConnector {
       author: {
         id: msg.author.id,
         username: msg.author.username,
-        displayName: msg.member?.displayName || msg.author.username,
+        displayName: msg.author.username,  // Use username consistently (chapter2 compatibility)
         bot: msg.author.bot,
       },
       content,
