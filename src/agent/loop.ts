@@ -245,7 +245,7 @@ export class AgentLoop {
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
-        authorizedRoles: [],  // Will apply after loading config
+        authorized_roles: [],  // Will apply after loading config
       })
       
       // 4. Load configuration from the fetched pinned messages

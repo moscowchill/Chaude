@@ -26,7 +26,7 @@ export interface ConnectorOptions {
 export interface FetchContextParams {
   channelId: string
   depth: number  // Max messages
-  authorizedRoles?: string[]
+  authorized_roles?: string[]
 }
 
 export class DiscordConnector {
@@ -86,7 +86,7 @@ export class DiscordConnector {
    * Fetch context from Discord (messages, configs, images)
    */
   async fetchContext(params: FetchContextParams): Promise<DiscordContext> {
-    const { channelId, depth, authorizedRoles } = params
+    const { channelId, depth, authorized_roles } = params
 
     return retryDiscord(async () => {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -140,11 +140,11 @@ export class DiscordConnector {
         
         // Check authorization if roles are specified
         let authorized = true
-        if (authorizedRoles && authorizedRoles.length > 0) {
+        if (authorized_roles && authorized_roles.length > 0) {
           const member = historyCmd.member
           if (member) {
             const memberRoles = member.roles.cache.map(r => r.name)
-            authorized = authorizedRoles.some(role => memberRoles.includes(role))
+            authorized = authorized_roles.some(role => memberRoles.includes(role))
           } else {
             authorized = false
           }
@@ -154,7 +154,7 @@ export class DiscordConnector {
               { 
                 userId: historyCmd.author.id, 
                 username: historyCmd.author.username,
-                requiredRoles: authorizedRoles
+                requiredRoles: authorized_roles
               }, 
               'User not authorized for .history command'
             )

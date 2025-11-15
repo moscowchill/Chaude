@@ -12,14 +12,14 @@ maxTokens: 4096
 topP: 1.0
 
 # Context configuration
-recencyWindowMessages: 400  # Optional: Max messages to include
-recencyWindowCharacters: 100000  # Optional: Max characters to include
+recency_window_messages: 400  # Optional: Max messages to include
+recency_window_characters: 100000  # Optional: Max characters to include
 # When both specified, whichever limit is reached first is used
-hardMaxCharacters: 500000  # Hard limit never exceeded (prevents API errors), defaults to 500k (~140k tokens)
-rollingThreshold: 50  # Roll context after this many new messages
-recentParticipantCount: 10  # Number of recent participants for stop sequences
-authorizedRoles: []  # Roles authorized for .history commands (empty = all allowed)
-# authorizedRoles: ["Admin", "Moderator"]  # Example: restrict to specific roles
+hard_max_characters: 500000  # Hard limit never exceeded (prevents API errors), defaults to 500k (~140k tokens)
+rolling_threshold: 50  # Roll context after this many new messages
+recent_participant_count: 10  # Number of recent participants for stop sequences
+authorized_roles: []  # Roles authorized for .history commands (empty = all allowed)
+# authorized_roles: ["Admin", "Moderator"]  # Example: restrict to specific roles
 
 # Image configuration
 includeImages: true

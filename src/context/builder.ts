@@ -174,14 +174,14 @@ export class ContextBuilder {
     messagesSinceRoll: number,
     config: BotConfig
   ): { messages: DiscordMessage[]; didRoll: boolean } {
-    const shouldRoll = messagesSinceRoll >= config.rollingThreshold
+    const shouldRoll = messagesSinceRoll >= config.rolling_threshold
 
     // Calculate total characters
     const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0)
     
     // Hard maximum to prevent API errors (never exceed this)
     // Default: 500k chars = ~140k tokens (well under 200k limit)
-    const hardMaxCharacters = config.hardMaxCharacters || 500000
+    const hardMaxCharacters = config.hard_max_characters || 500000
     
     // Check hard maximum first - always enforce this
     if (totalChars > hardMaxCharacters) {
@@ -212,7 +212,7 @@ export class ContextBuilder {
     if (!shouldRoll) {
       logger.debug({ 
         messagesSinceRoll, 
-        threshold: config.rollingThreshold,
+        threshold: config.rolling_threshold,
         messageCount: messages.length,
         totalChars
       }, 'Not rolling yet - keeping all messages for cache efficiency')
@@ -224,17 +224,17 @@ export class ContextBuilder {
     let characterLimitCutoff = 0  // Index to slice from (0 = no limit)
 
     // Calculate message limit cutoff
-    if (config.recencyWindowMessages !== undefined && messages.length > config.recencyWindowMessages) {
-      messageLimitCutoff = messages.length - config.recencyWindowMessages
+    if (config.recency_window_messages !== undefined && messages.length > config.recency_window_messages) {
+      messageLimitCutoff = messages.length - config.recency_window_messages
     }
 
     // Calculate character limit cutoff
-    if (config.recencyWindowCharacters !== undefined) {
+    if (config.recency_window_characters !== undefined) {
       let chars = 0
 
       for (let i = messages.length - 1; i >= 0; i--) {
         chars += messages[i]!.content.length
-        if (chars > config.recencyWindowCharacters) {
+        if (chars > config.recency_window_characters) {
           characterLimitCutoff = i + 1
           break
         }
@@ -282,7 +282,7 @@ export class ContextBuilder {
     messagesSinceRoll: number,
     config: BotConfig
   ): { messages: ParticipantMessage[], didTruncate: boolean } {
-    const shouldRoll = messagesSinceRoll >= config.rollingThreshold
+    const shouldRoll = messagesSinceRoll >= config.rolling_threshold
     
     // Calculate total size of FINAL context (text + images + tool results)
     let totalChars = 0
@@ -306,8 +306,8 @@ export class ContextBuilder {
       }
     }
     
-    const hardMaxCharacters = config.hardMaxCharacters || 500000
-    const normalLimit = config.recencyWindowCharacters || 100000  // Default normal limit
+    const hardMaxCharacters = config.hard_max_characters || 500000
+    const normalLimit = config.recency_window_characters || 100000  // Default normal limit
     
     // ALWAYS enforce hard maximum (even when not rolling)
     // When exceeded, truncate to NORMAL limit (not hard max) to reset cache properly
@@ -326,7 +326,7 @@ export class ContextBuilder {
     if (!shouldRoll) {
       logger.debug({
         messagesSinceRoll,
-        threshold: config.rollingThreshold,
+        threshold: config.rolling_threshold,
         messageCount: messages.length,
         totalChars,
         totalMB: (totalChars / 1024 / 1024).toFixed(2)
@@ -335,7 +335,7 @@ export class ContextBuilder {
     }
     
     // Time to roll - check normal limits
-    const messageLimit = config.recencyWindowMessages || Infinity
+    const messageLimit = config.recency_window_messages || Infinity
     
     // Apply character limit
     if (totalChars > normalLimit) {
@@ -656,7 +656,7 @@ export class ContextBuilder {
     const seen = new Set<string>()
 
     // Iterate backwards to get most recent participants
-    for (let i = participantMessages.length - 1; i >= 0 && recentParticipants.length < config.recentParticipantCount; i--) {
+    for (let i = participantMessages.length - 1; i >= 0 && recentParticipants.length < config.recent_participant_count; i--) {
       const participant = participantMessages[i]?.participant
       if (participant && !seen.has(participant)) {
         seen.add(participant)

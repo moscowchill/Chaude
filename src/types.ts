@@ -143,12 +143,12 @@ export interface BotConfig {
   topP: number
   
   // Context config
-  recencyWindowMessages?: number  // Max number of messages
-  recencyWindowCharacters?: number  // Max number of characters
-  hardMaxCharacters?: number  // Hard maximum - never exceeded (prevents API errors)
-  rollingThreshold: number  // Messages before truncation
-  recentParticipantCount: number  // Number of recent participants for stop sequences
-  authorizedRoles: string[]  // Roles authorized to use .history commands
+  recency_window_messages?: number  // Max number of messages
+  recency_window_characters?: number  // Max number of characters
+  hard_max_characters?: number  // Hard maximum - never exceeded (prevents API errors)
+  rolling_threshold: number  // Messages before truncation
+  recent_participant_count: number  // Number of recent participants for stop sequences
+  authorized_roles: string[]  // Roles authorized to use .history commands
   
   // Image config
   includeImages: boolean

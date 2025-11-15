@@ -141,11 +141,12 @@ export class ConfigSystem {
       topP: config.topP ?? 1.0,
 
       // Context config
-      recencyWindowMessages: config.recencyWindowMessages,
-      recencyWindowCharacters: config.recencyWindowCharacters,
-      rollingThreshold: config.rollingThreshold || 50,
-      recentParticipantCount: config.recentParticipantCount || 10,
-      authorizedRoles: config.authorizedRoles || [],
+      recency_window_messages: config.recency_window_messages,
+      recency_window_characters: config.recency_window_characters,
+      hard_max_characters: config.hard_max_characters,
+      rolling_threshold: config.rolling_threshold || 50,
+      recent_participant_count: config.recent_participant_count || 10,
+      authorized_roles: config.authorized_roles || [],
 
       // Image config
       includeImages: config.includeImages ?? true,

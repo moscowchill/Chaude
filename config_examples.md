@@ -8,7 +8,6 @@ vendors:
       provides: ["anthropic\\.claude.*"]  # Match Bedrock model names
     anthropic-steering-preview:
         config:
-#            anthropic_api_key: "YOUR_ANTHROPIC_API_KEY_HERE"
              anthropic_api_key: "YOUR_ANTHROPIC_API_KEY_HERE"
         provides:
             - "claude-3-sonnet-20240229-steering-preview"
