@@ -177,10 +177,11 @@ export class ApiServer {
       throw new Error('Invalid Discord message URL format')
     }
 
-    // Calculate fetch depth (consider recency window for efficiency)
-    const depth = request.recencyWindow?.messages 
-      ? Math.min(request.recencyWindow.messages + 100, 1000)  // Fetch a bit more for .history processing
-      : 1000  // Default max
+    // Default recency window: 50 messages
+    const recencyWindow = request.recencyWindow || { messages: 50 }
+    
+    // Calculate fetch depth (fetch a bit more for .history processing)
+    const depth = Math.min((recencyWindow.messages || 50) + 100, 1000)
 
     // Use connector's fetchContext which handles .history commands automatically
     const context = await this.connector.fetchContext({
@@ -190,10 +191,10 @@ export class ApiServer {
 
     let messages = context.messages
 
-    // Apply recency window if specified
-    if (request.recencyWindow) {
-      const beforeTruncate = messages.length
-      messages = this.applyRecencyWindow(messages, request.recencyWindow)
+    // Apply recency window
+    const beforeTruncate = messages.length
+    messages = this.applyRecencyWindow(messages, recencyWindow)
+    if (beforeTruncate > messages.length) {
       logger.debug({ beforeTruncate, afterTruncate: messages.length }, 'Applied recency window')
     }
 
