@@ -80,8 +80,9 @@ Export Discord conversation history with full metadata. Automatically processes 
 - `last` (required): Discord message URL - end point of range
 - `first` (optional): Discord message URL - start point of range  
 - `recencyWindow` (optional): Limits to apply
-  - `messages`: Maximum number of messages
+  - `messages`: Maximum number of messages (default: 50)
   - `characters`: Maximum total characters
+  - If omitted entirely, defaults to 50 messages
 
 **Response:**
 ```json

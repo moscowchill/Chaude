@@ -8,6 +8,7 @@ dist/
 .env
 .env.local
 discord_token
+api_token
 
 # Logs
 logs/
