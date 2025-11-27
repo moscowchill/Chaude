@@ -39,3 +39,4 @@ coverage/
 config/shared.yaml
 config/bots/StrangeSonnet4.5.yaml
 tools/claude/*
+tools/StrangeSonnet4.5/*
