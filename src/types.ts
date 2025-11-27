@@ -124,6 +124,7 @@ export interface ModelConfig {
   max_tokens: number
   top_p: number
   mode: 'prefill' | 'chat'
+  prefill_thinking?: boolean  // If true, prefill with <thinking> tag
   botInnerName: string  // For building stop sequences
 }
 
@@ -137,6 +138,8 @@ export interface BotConfig {
   
   // Model config
   mode: 'prefill' | 'chat'
+  prefill_thinking?: boolean  // If true, prefill with <thinking> tag to enable reasoning
+  debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
   continuation_model: string
   temperature: number
   max_tokens: number
@@ -159,6 +162,7 @@ export interface BotConfig {
   tool_output_visible: boolean
   max_tool_depth: number
   mcp_servers?: MCPServerConfig[]
+  tool_plugins?: string[]  // Plugin names to enable (e.g., ['config'])
   
   // Stop sequences
   stop_sequences: string[]
@@ -204,9 +208,10 @@ export interface ToolCall {
   id: string
   name: string
   input: Record<string, any>
-  messageId: string  // For pruning old calls
+  messageId: string  // For pruning old calls (triggering user message)
   timestamp: Date
   originalCompletionText: string  // The bot's original text including XML tool call
+  botMessageIds?: string[]  // Discord message IDs from bot's response (for existence checking)
 }
 
 export interface ToolCallWithResult {

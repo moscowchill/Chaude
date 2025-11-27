@@ -16,6 +16,17 @@ import {
   ModelConfig,
 } from '../types.js'
 import { logger } from '../utils/logger.js'
+import { 
+  ContextBuildInfo, 
+  ContextMessageInfo,
+  MessageTransformation,
+  getCurrentTrace,
+} from '../trace/index.js'
+import {
+  estimateMessageTokens,
+  estimateSystemTokens,
+  extractTextContent,
+} from '../trace/tokens.js'
 
 export interface BuildContextParams {
   discordContext: DiscordContext
@@ -25,20 +36,39 @@ export interface BuildContextParams {
   config: BotConfig
 }
 
+export interface ContextBuildResultWithTrace extends ContextBuildResult {
+  /** Trace info for debugging (only populated if tracing is active) */
+  traceInfo?: ContextBuildInfo
+}
+
 export class ContextBuilder {
   /**
    * Build LLM request from Discord context
    */
-  buildContext(params: BuildContextParams): ContextBuildResult {
+  buildContext(params: BuildContextParams): ContextBuildResultWithTrace {
     const { discordContext, toolCacheWithResults, lastCacheMarker, messagesSinceRoll, config } = params
+    const originalMessageCount = discordContext.messages.length
 
     let messages = discordContext.messages
 
+    // Track which messages were merged (for tracing)
+    const mergedMessageIds = new Set<string>()
+    
     // 1. Merge consecutive bot messages
+    const beforeMerge = messages.length
     messages = this.mergeConsecutiveBotMessages(messages, config.innerName)
+    if (messages.length < beforeMerge) {
+      // Some messages were merged - track them
+      const afterIds = new Set(messages.map(m => m.id))
+      discordContext.messages.forEach(m => {
+        if (!afterIds.has(m.id)) mergedMessageIds.add(m.id)
+      })
+    }
 
     // 2. Filter dot messages
+    const beforeFilter = messages.length
     messages = this.filterDotMessages(messages)
+    const filteredCount = beforeFilter - messages.length
 
     // 3. Convert to participant messages (limits applied later on final context)
     const participantMessages = this.formatMessages(messages, discordContext.images, config)
@@ -83,7 +113,7 @@ export class ContextBuilder {
     participantMessages.push(...interleavedMessages)
 
     // 5. Apply limits on final assembled context (after images & tools added)
-    const { messages: finalMessages, didTruncate } = this.applyLimits(
+    const { messages: finalMessages, didTruncate, messagesRemoved } = this.applyLimits(
       participantMessages, 
       messagesSinceRoll,
       config
@@ -121,10 +151,178 @@ export class ContextBuilder {
       stop_sequences,
     }
 
+    // Build trace info if tracing is active
+    const traceInfo = this.buildTraceInfo(
+      participantMessages,
+      discordContext,
+      toolCacheWithResults,
+      config,
+      {
+        originalMessageCount,
+        filteredCount,
+        mergedMessageIds,
+        didTruncate,
+        messagesRolledOff: messagesRemoved || 0,
+        cacheMarker,
+        lastCacheMarker,
+        stopSequences: stop_sequences,
+      }
+    )
+    
+    // Record to active trace if available
+    if (traceInfo) {
+      getCurrentTrace()?.recordContextBuild(traceInfo)
+    }
+
     return {
       request,
       didRoll: didTruncate,
       cacheMarker,
+      traceInfo,
+    }
+  }
+  
+  /**
+   * Build trace info for debugging
+   */
+  private buildTraceInfo(
+    finalMessages: ParticipantMessage[],
+    _discordContext: DiscordContext,
+    toolCacheWithResults: Array<{call: ToolCall, result: any}>,
+    config: BotConfig,
+    metadata: {
+      originalMessageCount: number
+      filteredCount: number
+      mergedMessageIds: Set<string>
+      didTruncate: boolean
+      messagesRolledOff: number
+      cacheMarker: string | null
+      lastCacheMarker: string | null
+      stopSequences: string[]
+    }
+  ): ContextBuildInfo | undefined {
+    // Build message info for each message in final context
+    const messageInfos: ContextMessageInfo[] = []
+    const triggeringMessageId = finalMessages.length > 1 
+      ? finalMessages[finalMessages.length - 2]?.messageId  // Last message before empty completion
+      : undefined
+    
+    // Count images
+    let totalImages = 0
+    const imageDetails: ContextBuildInfo['imageDetails'] = []
+    
+    for (let i = 0; i < finalMessages.length; i++) {
+      const msg = finalMessages[i]!
+      if (!msg.content.length) continue  // Skip empty completion message
+      
+      const transformations: MessageTransformation[] = []
+      
+      // Check for merged messages
+      if (msg.messageId && metadata.mergedMessageIds.has(msg.messageId)) {
+        transformations.push('merged_consecutive')
+      }
+      
+      // Check for images
+      let imageCount = 0
+      for (const block of msg.content) {
+        if (block.type === 'image') {
+          imageCount++
+          totalImages++
+          // Add image detail
+          imageDetails.push({
+            discordMessageId: msg.messageId || '',
+            url: 'embedded',  // Base64 embedded
+            tokenEstimate: 1000,  // Rough estimate
+          })
+        }
+      }
+      if (imageCount > 0) {
+        transformations.push('image_extracted')
+      }
+      
+      // Check for cache control
+      const hasCacheControl = !!msg.cacheControl
+      
+      const textContent = extractTextContent(msg)
+      
+      messageInfos.push({
+        position: i,
+        discordMessageId: msg.messageId || null,
+        participant: msg.participant,
+        contentPreview: textContent.slice(0, 150) + (textContent.length > 150 ? '...' : ''),
+        contentLength: textContent.length,
+        tokenEstimate: estimateMessageTokens(msg),
+        transformations,
+        isTrigger: msg.messageId === triggeringMessageId,
+        hasImages: imageCount > 0,
+        imageCount,
+        hasCacheControl,
+        discordTimestamp: msg.timestamp,
+      })
+    }
+    
+    // Calculate token estimates
+    const systemTokens = estimateSystemTokens(config.system_prompt)
+    let messageTokens = 0
+    let imageTokens = 0
+    let toolTokens = 0
+    
+    for (const msg of finalMessages) {
+      const msgTokens = estimateMessageTokens(msg)
+      
+      // Categorize by participant
+      if (msg.participant.startsWith('System<[')) {
+        toolTokens += msgTokens
+      } else {
+        // Check for images
+        for (const block of msg.content) {
+          if (block.type === 'image') {
+            imageTokens += 1000
+          }
+        }
+        messageTokens += msgTokens - (msg.content.filter(b => b.type === 'image').length * 1000)
+      }
+    }
+    
+    // Build tool cache details
+    const toolCacheDetails: ContextBuildInfo['toolCacheDetails'] = toolCacheWithResults.map(t => ({
+      toolName: t.call.name,
+      triggeringMessageId: t.call.messageId,
+      tokenEstimate: estimateMessageTokens({
+        participant: 'System',
+        content: [{ type: 'text', text: JSON.stringify(t.result) }],
+      }),
+    }))
+    
+    return {
+      messagesConsidered: metadata.originalMessageCount,
+      messagesIncluded: finalMessages.length - 1,  // Exclude empty completion message
+      messages: messageInfos,
+      imagesIncluded: totalImages,
+      imageDetails,
+      toolCacheEntries: toolCacheWithResults.length,
+      toolCacheDetails,
+      didTruncate: metadata.didTruncate,
+      truncateReason: metadata.didTruncate 
+        ? (metadata.messagesRolledOff > 0 ? 'rolling_threshold' : 'character_limit')
+        : undefined,
+      messagesRolledOff: metadata.messagesRolledOff,
+      cacheMarker: metadata.cacheMarker || undefined,
+      previousCacheMarker: metadata.lastCacheMarker || undefined,
+      stopSequences: metadata.stopSequences,
+      tokenEstimates: {
+        system: systemTokens,
+        messages: messageTokens,
+        images: imageTokens,
+        tools: toolTokens,
+        total: systemTokens + messageTokens + imageTokens + toolTokens,
+      },
+      configSnapshot: {
+        recencyWindow: config.recency_window_messages || 0,
+        rollingThreshold: config.rolling_threshold,
+        maxImages: config.max_images || 0,
+        mode: config.mode,
+      },
     }
   }
 
@@ -137,11 +335,18 @@ export class ContextBuilder {
     for (const msg of messages) {
       const isBotMessage = msg.author.displayName === botName
       const lastMsg = merged[merged.length - 1]
+      
+      // Don't merge messages starting with "." (tool outputs, preambles)
+      // These need to stay separate so they can be filtered later
+      const isDotMessage = msg.content.trim().startsWith('.')
+      const lastIsDotMessage = lastMsg?.content.trim().startsWith('.')
 
       if (
         isBotMessage &&
         lastMsg &&
-        lastMsg.author.displayName === botName
+        lastMsg.author.displayName === botName &&
+        !isDotMessage &&
+        !lastIsDotMessage
       ) {
         // Merge with previous message (space separator)
         lastMsg.content = `${lastMsg.content} ${msg.content}`
@@ -178,7 +383,7 @@ export class ContextBuilder {
     messages: ParticipantMessage[],
     messagesSinceRoll: number,
     config: BotConfig
-  ): { messages: ParticipantMessage[], didTruncate: boolean } {
+  ): { messages: ParticipantMessage[], didTruncate: boolean, messagesRemoved?: number } {
     const shouldRoll = messagesSinceRoll >= config.rolling_threshold
     
     // Calculate total size of FINAL context (text + images + tool results)
@@ -216,7 +421,8 @@ export class ContextBuilder {
         messageCount: messages.length
       }, 'HARD LIMIT EXCEEDED - Truncating to normal limit and forcing roll')
       
-      return this.truncateToLimit(messages, normalLimit, true)
+      const result = this.truncateToLimit(messages, normalLimit, true)
+      return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
     // If not rolling yet, allow normal limits to be exceeded (for cache efficiency)
@@ -228,7 +434,7 @@ export class ContextBuilder {
         totalChars,
         totalMB: (totalChars / 1024 / 1024).toFixed(2)
       }, 'Not rolling yet - keeping all messages for cache')
-      return { messages, didTruncate: false }
+      return { messages, didTruncate: false, messagesRemoved: 0 }
     }
     
     // Time to roll - check normal limits
@@ -241,7 +447,8 @@ export class ContextBuilder {
         limit: normalLimit,
         messageCount: messages.length
       }, 'Rolling: Character limit exceeded, truncating final context')
-      return this.truncateToLimit(messages, normalLimit, true)
+      const result = this.truncateToLimit(messages, normalLimit, true)
+      return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
     // Apply message count limit
@@ -251,13 +458,15 @@ export class ContextBuilder {
         limit: messageLimit,
         keptChars: totalChars
       }, 'Rolling: Message count limit exceeded, truncating')
+      const removed = messages.length - messageLimit
       return { 
         messages: messages.slice(messages.length - messageLimit), 
-        didTruncate: true 
+        didTruncate: true,
+        messagesRemoved: removed,
       }
     }
     
-    return { messages, didTruncate: false }
+    return { messages, didTruncate: false, messagesRemoved: 0 }
   }
   
   /**
@@ -566,6 +775,9 @@ export class ContextBuilder {
       sequences.push(`${participant}:`)
     }
 
+    // Add system message prefixes (bot should never generate these)
+    sequences.push('System<[', 'System>[')
+
     // Add configured stop sequences
     sequences.push(...config.stop_sequences)
 
@@ -579,6 +791,7 @@ export class ContextBuilder {
       max_tokens: config.max_tokens,
       top_p: config.top_p,
       mode: config.mode,
+      prefill_thinking: config.prefill_thinking,
       botInnerName: config.innerName,
     }
   }

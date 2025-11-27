@@ -13,6 +13,14 @@ import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
+import { 
+  withTrace, 
+  TraceCollector, 
+  getTraceWriter,
+  traceToolExecution,
+  traceRawDiscordMessages,
+  RawDiscordMessage,
+} from '../trace/index.js'
 
 export class AgentLoop {
   private running = false
@@ -81,6 +89,21 @@ export class AgentLoop {
     // Get first event to access channel for config (for random check)
     const firstEvent = events[0]
     if (!firstEvent) return
+    
+    // Handle delete events - remove tool cache entries for deleted bot messages
+    for (const event of events) {
+      if (event.type === 'delete') {
+        const message = event.data as any
+        // Check if this is one of our bot messages
+        if (message.author?.id === this.botUserId) {
+          await this.toolSystem.removeEntriesByBotMessageId(
+            this.botId,
+            event.channelId,
+            message.id
+          )
+        }
+      }
+    }
 
     // Check if activation is needed
     if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
@@ -126,11 +149,41 @@ export class AgentLoop {
     // Mark channel as active and process asynchronously (don't await)
     this.activeChannels.add(channelId)
     
-    // Wrap activation in logging context if we have a triggering message
+    // Determine activation reason for tracing
+    const activationReason = this.determineActivationReason(events)
+    
+    // Wrap activation in both logging and trace context
     const activationPromise = triggeringMessageId
-      ? withActivationLogging(channelId, triggeringMessageId, () => 
-          this.handleActivation(channelId, guildId, triggeringMessageId)
-        )
+      ? withActivationLogging(channelId, triggeringMessageId, async () => {
+          // Run with trace context
+          const { trace } = await withTrace(
+            channelId,
+            triggeringMessageId,
+            this.botId,
+            async (traceCollector) => {
+              // Record activation info
+              traceCollector.setGuildId(guildId)
+              if (this.botUserId) {
+                traceCollector.setBotUserId(this.botUserId)
+              }
+              traceCollector.recordActivation({
+                reason: activationReason.reason,
+                triggerEvents: activationReason.events,
+              })
+              
+              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector)
+            }
+          )
+          
+          // Write trace to disk
+          try {
+            const writer = getTraceWriter()
+            writer.writeTrace(trace)
+            logger.info({ traceId: trace.traceId, channelId }, 'Trace saved')
+          } catch (error) {
+            logger.error({ error }, 'Failed to write trace')
+          }
+        })
       : this.handleActivation(channelId, guildId, triggeringMessageId)
     
     activationPromise
@@ -140,6 +193,41 @@ export class AgentLoop {
       .finally(() => {
         this.activeChannels.delete(channelId)
       })
+  }
+  
+  private determineActivationReason(events: Event[]): { 
+    reason: 'mention' | 'reply' | 'random' | 'm_command', 
+    events: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> 
+  } {
+    const triggerEvents: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> = []
+    let reason: 'mention' | 'reply' | 'random' | 'm_command' = 'mention'
+    
+    for (const event of events) {
+      if (event.type === 'message') {
+        const message = event.data as any
+        const content = message.content?.trim() || ''
+        
+        if ((event.data as any)._isMCommand) {
+          reason = 'm_command'
+        } else if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
+          reason = 'reply'
+        } else if (this.botUserId && message.mentions?.has(this.botUserId)) {
+          reason = 'mention'
+        } else {
+          reason = 'random'
+        }
+        
+        triggerEvents.push({
+          type: event.type,
+          messageId: message.id,
+          authorId: message.author?.id,
+          authorName: message.author?.username,
+          contentPreview: content.slice(0, 100),
+        })
+      }
+    }
+    
+    return { reason, events: triggerEvents }
   }
 
   private async replaceMentions(text: string, messages: any[]): Promise<string> {
@@ -159,6 +247,72 @@ export class AgentLoop {
       const pattern = new RegExp(`<@${name}>`, 'gi')
       result = result.replace(pattern, `<@${userId}>`)
     }
+    
+    return result
+  }
+
+  /**
+   * Strip thinking blocks from text, respecting backtick escaping
+   * e.g., "<thinking>foo</thinking>" -> ""
+   * e.g., "`<thinking>foo</thinking>`" -> "`<thinking>foo</thinking>`" (preserved)
+   */
+  private stripThinkingBlocks(text: string): { stripped: string; content: string[] } {
+    const content: string[] = []
+    
+    // Match thinking blocks that are NOT inside backticks
+    // Strategy: find all thinking blocks, check if they're escaped
+    const pattern = /<thinking>([\s\S]*?)<\/thinking>/g
+    let result = text
+    let match
+    
+    // Collect matches first to avoid mutation during iteration
+    const matches: Array<{ full: string; content: string; index: number }> = []
+    while ((match = pattern.exec(text)) !== null) {
+      matches.push({ full: match[0], content: match[1] || '', index: match.index })
+    }
+    
+    // Process in reverse order to preserve indices
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const m = matches[i]!
+      const before = text.slice(0, m.index)
+      const after = text.slice(m.index + m.full.length)
+      
+      // Check if it's inside backticks (single or triple)
+      const isEscaped = (
+        (before.endsWith('`') && after.startsWith('`')) ||
+        (before.endsWith('```') || before.match(/```[^\n]*\n[^`]*$/)) // Inside code block
+      )
+      
+      if (!isEscaped) {
+        content.unshift(m.content.trim())
+        result = result.slice(0, m.index) + result.slice(m.index + m.full.length)
+      }
+    }
+    
+    return { stripped: result, content }
+  }
+
+  /**
+   * Strip tool call XML and thinking blocks from text, leaving any preamble/surrounding text
+   * e.g., "Let me check that <read_graph>{}</read_graph>" -> "Let me check that"
+   * e.g., "<thinking>reasoning</thinking><tool>{}</tool>" -> ""
+   */
+  private stripToolCallsFromText(text: string, toolUseBlocks: any[]): string {
+    // Strip thinking blocks first (respecting backtick escaping)
+    let result = this.stripThinkingBlocks(text).stripped
+    
+    // Get tool names that were parsed
+    const toolNames = toolUseBlocks.map(b => b.name)
+    
+    // Remove each tool call XML pattern
+    for (const name of toolNames) {
+      // Pattern matches: <tool_name>...</tool_name> with optional JSON inside
+      const pattern = new RegExp(`<${name}>\\s*(?:\\{[\\s\\S]*?\\})?\\s*</${name}>`, 'g')
+      result = result.replace(pattern, '')
+    }
+    
+    // Clean up extra whitespace
+    result = result.replace(/\n{3,}/g, '\n\n').trim()
     
     return result
   }
@@ -239,8 +393,13 @@ export class AgentLoop {
     return false
   }
 
-  private async handleActivation(channelId: string, guildId: string, triggeringMessageId?: string): Promise<void> {
-    logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId }, 'Bot activated')
+  private async handleActivation(
+    channelId: string, 
+    guildId: string, 
+    triggeringMessageId?: string,
+    trace?: TraceCollector
+  ): Promise<void> {
+    logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId, traceId: trace?.getTraceId() }, 'Bot activated')
 
     // Start typing indicator
     await this.connector.startTyping(channelId)
@@ -264,6 +423,29 @@ export class AgentLoop {
         authorized_roles: [],  // Will apply after loading config
       })
       
+      // Record raw Discord messages to trace (before any transformation)
+      if (trace) {
+        const rawMessages: RawDiscordMessage[] = discordContext.messages.map(msg => ({
+          id: msg.id,
+          author: {
+            id: msg.author.id,
+            username: msg.author.username,
+            displayName: msg.author.displayName,
+            bot: msg.author.bot,
+          },
+          content: msg.content,
+          timestamp: msg.timestamp,
+          attachments: msg.attachments.map(att => ({
+            url: att.url,
+            contentType: att.contentType,
+            filename: att.filename || 'unknown',
+            size: att.size || 0,
+          })),
+          replyTo: msg.referencedMessage,
+        }))
+        traceRawDiscordMessages(rawMessages)
+      }
+      
       // 4. Load configuration from the fetched pinned messages
       const config = this.configSystem.loadConfig({
         botName: this.botId,
@@ -277,6 +459,24 @@ export class AgentLoop {
         await this.toolSystem.initializeServers(config.mcp_servers)
         this.mcpInitialized = true
       }
+      
+      // Load tool plugins from config
+      if (config.tool_plugins && config.tool_plugins.length > 0) {
+        this.toolSystem.loadPlugins(config.tool_plugins)
+      }
+      
+      // Set plugin context for this activation
+      this.toolSystem.setPluginContext({
+        botId: this.botId,
+        channelId,
+        config,
+        sendMessage: async (content: string) => {
+          return await this.connector.sendMessage(channelId, content)
+        },
+        pinMessage: async (messageId: string) => {
+          await this.connector.pinMessage(channelId, messageId)
+        },
+      })
 
       // Filter out "m " command messages from context (they should be deleted but might still be fetched)
       const originalCount = discordContext.messages.length
@@ -297,11 +497,43 @@ export class AgentLoop {
         const oldestMessageId = discordContext.messages[0]!.id
         this.stateManager.pruneToolCache(this.botId, channelId, oldestMessageId)
       }
+      
+      // 4b. Re-load tool cache filtering by existing Discord messages
+      // (removes entries where bot messages were deleted)
+      const existingMessageIds = new Set(discordContext.messages.map(m => m.id))
+      const filteredToolCache = await this.toolSystem.loadCacheWithResults(
+        this.botId, 
+        channelId, 
+        existingMessageIds
+      )
+      const toolCacheForContext = filteredToolCache
+      
+      // 4c. Filter out Discord messages that are in tool cache's botMessageIds
+      // (the tool cache has the full completion with tool call - avoids duplication)
+      const toolCacheBotMessageIds = new Set<string>()
+      for (const entry of toolCacheForContext) {
+        if (entry.call.botMessageIds) {
+          entry.call.botMessageIds.forEach(id => toolCacheBotMessageIds.add(id))
+        }
+      }
+      
+      if (toolCacheBotMessageIds.size > 0) {
+        const beforeFilter = discordContext.messages.length
+        discordContext.messages = discordContext.messages.filter(msg => 
+          !toolCacheBotMessageIds.has(msg.id)
+        )
+        if (discordContext.messages.length < beforeFilter) {
+          logger.debug({ 
+            filtered: beforeFilter - discordContext.messages.length,
+            remaining: discordContext.messages.length
+          }, 'Filtered Discord messages covered by tool cache')
+        }
+      }
 
       // 5. Build LLM context
       const buildParams: BuildContextParams = {
         discordContext,
-        toolCacheWithResults,
+        toolCacheWithResults: toolCacheForContext,  // Use filtered version (excludes deleted bot messages)
         lastCacheMarker: state.lastCacheMarker,
         messagesSinceRoll: state.messagesSinceRoll,
         config,
@@ -315,7 +547,7 @@ export class AgentLoop {
       }
 
       // 6. Call LLM (with tool loop)
-      const completion = await this.executeWithTools(
+      const { completion, toolCallIds, preambleMessageIds } = await this.executeWithTools(
         contextResult.request, 
         config, 
         channelId,
@@ -337,6 +569,41 @@ export class AgentLoop {
         responseLength: responseText.length
       }, 'Extracted response text')
 
+      // Strip ALL <thinking>...</thinking> sections (respecting backtick escaping)
+      const { stripped: strippedResponse, content: thinkingContents } = this.stripThinkingBlocks(responseText)
+      
+      if (thinkingContents.length > 0) {
+        const allThinkingContent = thinkingContents.join('\n\n---\n\n')
+        
+        logger.debug({ 
+          thinkingBlocks: thinkingContents.length,
+          totalThinkingLength: allThinkingContent.length 
+        }, 'Stripped thinking sections from response')
+        
+        // Send thinking as debug message if enabled
+        if (config.debug_thinking && allThinkingContent) {
+          const thinkingDebugContent = `.💭 ${allThinkingContent}`
+          if (thinkingDebugContent.length <= 1800) {
+            // Send as regular message
+            await this.connector.sendMessage(channelId, thinkingDebugContent, triggeringMessageId)
+          } else {
+            // Send as text file attachment
+            await this.connector.sendMessageWithAttachment(
+              channelId,
+              '.💭',
+              {
+                name: 'thinking.txt',
+                content: allThinkingContent,
+              },
+              triggeringMessageId
+            )
+          }
+        }
+        
+        // Use the already-stripped response
+        responseText = strippedResponse.trim()
+      }
+
       // Strip <reply:@username> prefix if bot included it (bot responses are already Discord replies)
       const replyPattern = /^\s*<reply:@[^>]+>\s*/
       if (replyPattern.test(responseText)) {
@@ -347,13 +614,21 @@ export class AgentLoop {
       // Replace <@username> with <@USER_ID> for Discord mentions
       responseText = await this.replaceMentions(responseText, discordContext.messages)
 
+      let sentMessageIds: string[] = []
       if (responseText.trim()) {
         // Send as reply to triggering message
-        const sentMessageIds = await this.connector.sendMessage(channelId, responseText, triggeringMessageId)
+        sentMessageIds = await this.connector.sendMessage(channelId, responseText, triggeringMessageId)
         // Track bot's message IDs for reply detection
         sentMessageIds.forEach((id) => this.botMessageIds.add(id))
       } else {
         logger.warn('No text content to send in response')
+      }
+      
+      // Update tool cache entries with bot message IDs (for existence checking on reload)
+      // Include both preamble message IDs and final response message IDs
+      const allBotMessageIds = [...preambleMessageIds, ...sentMessageIds]
+      if (toolCallIds.length > 0 && allBotMessageIds.length > 0) {
+        await this.toolSystem.updateBotMessageIds(this.botId, channelId, toolCallIds, allBotMessageIds)
       }
 
       // 9. Update state
@@ -370,9 +645,34 @@ export class AgentLoop {
         this.stateManager.incrementMessageCount(this.botId, channelId)
       }
 
+      // Record successful outcome to trace
+      if (trace) {
+        trace.recordOutcome({
+          success: true,
+          responseText,
+          responseLength: responseText.length,
+          sentMessageIds,
+          messagesSent: sentMessageIds.length,
+          maxToolDepth: trace.getLLMCallCount(),
+          hitMaxToolDepth: false,
+          stateUpdates: {
+            cacheMarkerUpdated: contextResult.cacheMarker !== state.lastCacheMarker,
+            newCacheMarker: contextResult.cacheMarker || undefined,
+            messageCountReset: contextResult.didRoll,
+            newMessageCount: contextResult.didRoll ? 0 : state.messagesSinceRoll + 1,
+          },
+        })
+      }
+
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
     } catch (error) {
       await this.connector.stopTyping(channelId)
+      
+      // Record error to trace
+      if (trace) {
+        trace.recordError('llm_call', error instanceof Error ? error : new Error(String(error)))
+      }
+      
       throw error
     }
   }
@@ -382,13 +682,24 @@ export class AgentLoop {
     config: BotConfig,
     channelId: string,
     triggeringMessageId: string
-  ): Promise<any> {
+  ): Promise<{ completion: any; toolCallIds: string[]; preambleMessageIds: string[] }> {
     let depth = 0
     let currentRequest = llmRequest
     let allToolResults: Array<{ call: any; result: any }> = []
+    let allToolCallIds: string[] = []
+    let allPreambleMessageIds: string[] = []
 
     while (depth < config.max_tool_depth) {
       const completion = await this.llmMiddleware.complete(currentRequest)
+
+      // If prefill_thinking was enabled, prepend <thinking> to the first text block
+      // (the prefilled <thinking> isn't in the completion, only the content and </thinking>)
+      if (config.prefill_thinking) {
+        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
+        if (firstTextBlock?.text) {
+          firstTextBlock.text = '<thinking>' + firstTextBlock.text
+        }
+      }
 
       // Check for tool use (native tool_use blocks in chat mode)
       let toolUseBlocks = completion.content.filter((c) => c.type === 'tool_use')
@@ -417,11 +728,49 @@ export class AgentLoop {
 
       if (toolUseBlocks.length === 0) {
         // No tools, return completion
-        return completion
+        return { completion, toolCallIds: allToolCallIds, preambleMessageIds: allPreambleMessageIds }
       }
 
       // Execute tools
       logger.debug({ toolCount: toolUseBlocks.length, depth }, 'Executing tools')
+
+      // In prefill mode, send any text before the tool call to Discord
+      // (e.g., "Let me search for that" before <tool_call>{}</tool_call>)
+      // Track preamble message IDs so they can be filtered from context later
+      // (the tool cache has the full completion with tool call)
+      if (config.mode === 'prefill') {
+        const textContent = completion.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('\n')
+        
+        // Extract thinking content (respecting backtick escaping)
+        const { content: thinkingContents } = this.stripThinkingBlocks(textContent)
+        
+        // Send thinking content if debug_thinking is enabled
+        if (config.debug_thinking && thinkingContents.length > 0) {
+          const thinkingContent = thinkingContents.join('\n\n---\n\n')
+          const thinkingDebugContent = `.💭 ${thinkingContent}`
+          if (thinkingDebugContent.length <= 1800) {
+            await this.connector.sendMessage(channelId, thinkingDebugContent, triggeringMessageId)
+          } else {
+            await this.connector.sendMessageWithAttachment(
+              channelId,
+              '.💭',
+              { name: 'thinking.txt', content: thinkingContent },
+              triggeringMessageId
+            )
+          }
+        }
+        
+        // Strip tool call XML and thinking from text to get the "preamble"
+        const preamble = this.stripToolCallsFromText(textContent, toolUseBlocks)
+        if (preamble.trim()) {
+          logger.debug({ preambleLength: preamble.length }, 'Sending tool call preamble to Discord')
+          const preambleIds = await this.connector.sendMessage(channelId, preamble.trim(), triggeringMessageId)
+          allPreambleMessageIds.push(...preambleIds)
+        }
+      }
 
       const toolResults: Array<{ call: any; result: any }> = []
 
@@ -436,7 +785,9 @@ export class AgentLoop {
           originalCompletionText: (toolUse as any).originalText || '',
         }
 
+        const toolStartTime = Date.now()
         const result = await this.toolSystem.executeTool(toolCall)
+        const toolDurationMs = Date.now() - toolStartTime
 
         // Persist tool use
         await this.toolSystem.persistToolUse(
@@ -447,10 +798,36 @@ export class AgentLoop {
         )
 
         toolResults.push({ call: toolCall, result: result.output })
+        allToolCallIds.push(toolCall.id)
+        
+        // Record tool execution to trace
+        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+        traceToolExecution({
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          input: toolCall.input,
+          output: outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr,
+          outputTruncated: outputStr.length > 1000,
+          fullOutputLength: outputStr.length,
+          durationMs: toolDurationMs,
+          sentToDiscord: config.tool_output_visible,
+          error: result.error ? String(result.error) : undefined,
+        })
 
         // Send tool output to Discord if visible (with period prefix to hide from bots)
         if (config.tool_output_visible) {
-          const toolMessage = `.${config.innerName}>[${toolCall.name}]: ${JSON.stringify(toolCall.input)}\n.${config.innerName}<[${toolCall.name}]: ${result.output}`
+          // Format input (compact)
+          const inputStr = JSON.stringify(toolCall.input)
+          
+          // Format output: remove newlines, trim if large, show length
+          const rawOutput = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+          const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
+          const maxLen = 200
+          const trimmedOutput = flatOutput.length > maxLen 
+            ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
+            : flatOutput
+          
+          const toolMessage = `.${config.innerName}>[${toolCall.name}]: ${inputStr}\n.${config.innerName}<[${toolCall.name}]: ${trimmedOutput}`
           await this.connector.sendWebhook(channelId, toolMessage, config.innerName)
         }
       }
@@ -483,10 +860,14 @@ export class AgentLoop {
 
     logger.warn('Reached max tool depth')
     return { 
-      content: [{ type: 'text', text: '[Max tool depth reached]' }], 
-      stopReason: 'end_turn' as const,
-      usage: { inputTokens: 0, outputTokens: 0 }, 
-      model: '' 
+      completion: {
+        content: [{ type: 'text', text: '[Max tool depth reached]' }], 
+        stopReason: 'end_turn' as const,
+        usage: { inputTokens: 0, outputTokens: 0 }, 
+        model: '' 
+      },
+      toolCallIds: allToolCallIds,
+      preambleMessageIds: allPreambleMessageIds
     }
   }
 }

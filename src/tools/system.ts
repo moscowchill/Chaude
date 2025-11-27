@@ -1,20 +1,65 @@
 /**
  * Tool System
- * Wraps MCP client and handles JSONL persistence
+ * Wraps MCP client, plugin tools, and handles JSONL persistence
  */
 
-import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolDefinition, ToolCall, ToolResult, ToolError, MCPServerConfig } from '../types.js'
 import { logger } from '../utils/logger.js'
+import { availablePlugins, PluginTool, PluginContext } from './plugins/index.js'
 
 export class ToolSystem {
   private mcpClients = new Map<string, Client>()
   private tools: ToolDefinition[] = []
+  private pluginHandlers = new Map<string, PluginTool['handler']>()
+  private loadedPlugins: string[] = []
+  private pluginContext: Partial<PluginContext> = {}
 
   constructor(private toolCacheDir: string) {}
+
+  /**
+   * Load tool plugins by name
+   */
+  loadPlugins(pluginNames: string[]): void {
+    for (const name of pluginNames) {
+      if (this.loadedPlugins.includes(name)) {
+        continue  // Already loaded
+      }
+      
+      const plugin = availablePlugins[name]
+      if (!plugin) {
+        logger.warn({ plugin: name }, 'Plugin not found')
+        continue
+      }
+      
+      // Register each tool from the plugin
+      for (const tool of plugin.tools) {
+        this.tools.push({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          serverName: `plugin:${name}`,
+        })
+        this.pluginHandlers.set(tool.name, tool.handler)
+      }
+      
+      this.loadedPlugins.push(name)
+      logger.info({ 
+        plugin: name, 
+        tools: plugin.tools.map(t => t.name) 
+      }, 'Loaded plugin')
+    }
+  }
+
+  /**
+   * Set context for plugin execution
+   */
+  setPluginContext(context: Partial<PluginContext>): void {
+    this.pluginContext = { ...this.pluginContext, ...context }
+  }
 
   /**
    * Initialize MCP clients from configuration
@@ -92,8 +137,14 @@ export class ToolSystem {
 
   /**
    * Load tool cache from JSONL files (with results)
+   * @param existingMessageIds - Optional set of Discord message IDs that exist. 
+   *                            Entries with botMessageIds not in this set are filtered out.
    */
-  async loadCacheWithResults(botId: string, channelId: string): Promise<Array<{call: ToolCall, result: any}>> {
+  async loadCacheWithResults(
+    botId: string, 
+    channelId: string,
+    existingMessageIds?: Set<string>
+  ): Promise<Array<{call: ToolCall, result: any}>> {
     const dirPath = join(this.toolCacheDir, botId, channelId)
 
     if (!existsSync(dirPath)) {
@@ -106,6 +157,7 @@ export class ToolSystem {
     const jsonlFiles = files.filter((f) => f.endsWith('.jsonl')).sort()
 
     const allEntries: Array<{call: ToolCall, result: any}> = []
+    let filteredCount = 0
 
     for (const file of jsonlFiles) {
       const filePath = join(dirPath, file)
@@ -115,6 +167,29 @@ export class ToolSystem {
 
         for (const line of lines) {
           const entry = JSON.parse(line)
+          
+          // Filter out entries where bot messages were deleted (or missing botMessageIds)
+          const botMsgIds = entry.call.botMessageIds as string[] | undefined
+          if (existingMessageIds) {
+            if (!botMsgIds || botMsgIds.length === 0) {
+              // Old entry without botMessageIds - skip it (can't verify existence)
+              filteredCount++
+              logger.debug({ 
+                toolCallId: entry.call.id
+              }, 'Filtering out tool cache entry - no botMessageIds (legacy entry)')
+              continue
+            }
+            // Check if at least one bot message still exists
+            const hasExistingMessage = botMsgIds.some(id => existingMessageIds.has(id))
+            if (!hasExistingMessage) {
+              filteredCount++
+              logger.debug({ 
+                toolCallId: entry.call.id, 
+                botMessageIds: botMsgIds 
+              }, 'Filtering out tool cache entry - bot messages deleted')
+              continue
+            }
+          }
           
           // Truncate large results to prevent context bloat
           let result = entry.result.output
@@ -131,6 +206,7 @@ export class ToolSystem {
               messageId: entry.call.messageId,
               timestamp: new Date(entry.timestamp),
               originalCompletionText: entry.call.originalCompletionText || '',
+              botMessageIds: botMsgIds,
             },
             result
           })
@@ -147,6 +223,7 @@ export class ToolSystem {
       botId, 
       channelId, 
       total: allEntries.length,
+      filtered: filteredCount,
       returned: limitedEntries.length
     }, 'Loaded tool cache with results')
 
@@ -164,24 +241,43 @@ export class ToolSystem {
   /**
    * Parse tool calls from completion text (for prefill mode)
    * Looks for XML-formatted tool calls like: <tool_name>{"param": "value"}</tool_name>
+   * Also handles empty calls: <tool_name></tool_name> or <tool_name>{}</tool_name>
+   * Skips tool calls that are escaped (wrapped in backticks or inside code blocks)
    */
   parseToolCalls(completion: string, originalText: string): Array<{call: ToolCall, originalText: string}> {
     const results: Array<{call: ToolCall, originalText: string}> = []
 
-    // Pattern: <tool_name>{json}</tool_name>
-    const pattern = /<(\w+)>\s*(\{[\s\S]*?\})\s*<\/\1>/g
+    // First, mask out code blocks and inline code to avoid parsing escaped tool calls
+    // Replace ``` blocks and `inline` with placeholder that won't match
+    const masked = completion
+      .replace(/```[\s\S]*?```/g, '[CODE_BLOCK]')
+      .replace(/`[^`]+`/g, '[INLINE_CODE]')
+
+    // Pattern: <tool_name>optional_json</tool_name>
+    // Matches: <foo>{}</foo>, <foo>{"a":1}</foo>, <foo></foo>, <foo>  </foo>
+    const pattern = /<(\w+)>\s*(\{[\s\S]*?\})?\s*<\/\1>/g
     let match
 
-    while ((match = pattern.exec(completion)) !== null) {
+    while ((match = pattern.exec(masked)) !== null) {
       const toolName = match[1]
-      const jsonInput = match[2]
+      const jsonInput = match[2]  // May be undefined for empty tags
 
-      if (!toolName || !jsonInput) {
+      if (!toolName) {
+        continue
+      }
+      
+      // Check if this tool name exists in our known tools
+      const knownTool = this.tools.find(t => t.name === toolName)
+      if (!knownTool) {
+        // Not a known tool - might be regular XML in the conversation, skip it
+        logger.trace({ toolName }, 'Skipping unknown tool name (might be regular XML)')
         continue
       }
 
       try {
-        const input = JSON.parse(jsonInput.trim())
+        // Parse JSON or default to empty object
+        const input = jsonInput ? JSON.parse(jsonInput.trim()) : {}
+        
         results.push({
           call: {
             id: this.generateToolCallId(),
@@ -194,9 +290,9 @@ export class ToolSystem {
           originalText
         })
         
-        logger.debug({ toolName, input }, 'Parsed tool call from XML')
+        logger.debug({ toolName, input, hadJson: !!jsonInput }, 'Parsed tool call from XML')
       } catch (error) {
-        logger.warn({ error, match: match[0] }, 'Failed to parse tool call')
+        logger.warn({ error, match: match[0] }, 'Failed to parse tool call JSON')
       }
     }
 
@@ -204,11 +300,44 @@ export class ToolSystem {
   }
 
   /**
-   * Execute a tool via MCP (routes to correct server)
+   * Execute a tool (plugin or MCP)
    */
   async executeTool(call: ToolCall): Promise<ToolResult> {
-    if (this.mcpClients.size === 0) {
-      throw new ToolError('No MCP clients initialized')
+    // Check if this is a plugin tool
+    const pluginHandler = this.pluginHandlers.get(call.name)
+    if (pluginHandler) {
+      try {
+        logger.debug({ call, type: 'plugin' }, 'Executing plugin tool')
+        
+        const context: PluginContext = {
+          botId: this.pluginContext.botId || '',
+          channelId: this.pluginContext.channelId || '',
+          config: this.pluginContext.config || {},
+          sendMessage: this.pluginContext.sendMessage || (async () => []),
+          pinMessage: this.pluginContext.pinMessage || (async () => {}),
+        }
+        
+        const result = await pluginHandler(call.input, context)
+        
+        return {
+          callId: call.id,
+          output: typeof result === 'string' ? result : JSON.stringify(result),
+          timestamp: new Date(),
+        }
+      } catch (error: any) {
+        logger.error({ error, call }, 'Plugin tool execution failed')
+        return {
+          callId: call.id,
+          output: '',
+          error: error.message || 'Plugin tool execution failed',
+          timestamp: new Date(),
+        }
+      }
+    }
+
+    // MCP tool execution
+    if (this.mcpClients.size === 0 && this.pluginHandlers.size === 0) {
+      throw new ToolError('No tools initialized')
     }
 
     try {
@@ -221,7 +350,7 @@ export class ToolSystem {
         throw new ToolError(`No MCP client found for tool: ${call.name}`)
       }
 
-      logger.debug({ call, server: serverName }, 'Executing tool')
+      logger.debug({ call, server: serverName }, 'Executing MCP tool')
 
       const result = await client.callTool({
         name: call.name,
@@ -272,6 +401,7 @@ export class ToolSystem {
         input: call.input,
         messageId: call.messageId,
         originalCompletionText: call.originalCompletionText,
+        botMessageIds: call.botMessageIds,  // May be undefined, will be updated later
       },
       result: {
         output: result.output,
@@ -285,6 +415,106 @@ export class ToolSystem {
       logger.debug({ botId, channelId, tool: call.name }, 'Persisted tool use')
     } catch (error) {
       logger.error({ error, filePath }, 'Failed to persist tool use')
+    }
+  }
+
+  /**
+   * Update tool cache entries with bot message IDs
+   * Called after activation completes and we know which Discord messages were sent
+   */
+  async updateBotMessageIds(
+    botId: string,
+    channelId: string,
+    toolCallIds: string[],
+    botMessageIds: string[]
+  ): Promise<void> {
+    if (toolCallIds.length === 0 || botMessageIds.length === 0) return
+    
+    const dirPath = join(this.toolCacheDir, botId, channelId)
+    if (!existsSync(dirPath)) return
+    
+    // Read all JSONL files and update matching entries
+    const files = readdirSync(dirPath).filter(f => f.endsWith('.jsonl'))
+    
+    for (const file of files) {
+      const filePath = join(dirPath, file)
+      const content = readFileSync(filePath, 'utf-8')
+      const lines = content.trim().split('\n').filter(l => l)
+      
+      let modified = false
+      const updatedLines = lines.map(line => {
+        try {
+          const entry = JSON.parse(line)
+          if (toolCallIds.includes(entry.call?.id) && !entry.call?.botMessageIds) {
+            entry.call.botMessageIds = botMessageIds
+            modified = true
+            return JSON.stringify(entry)
+          }
+          return line
+        } catch {
+          return line
+        }
+      })
+      
+      if (modified) {
+        writeFileSync(filePath, updatedLines.join('\n') + '\n')
+        logger.debug({ botId, channelId, file, toolCallIds }, 'Updated tool cache with bot message IDs')
+      }
+    }
+  }
+
+  /**
+   * Remove tool cache entries associated with a deleted bot message
+   * Called when a bot message is deleted from Discord
+   */
+  async removeEntriesByBotMessageId(
+    botId: string,
+    channelId: string,
+    deletedMessageId: string
+  ): Promise<void> {
+    const dirPath = join(this.toolCacheDir, botId, channelId)
+    if (!existsSync(dirPath)) return
+    
+    const files = readdirSync(dirPath).filter(f => f.endsWith('.jsonl'))
+    let totalRemoved = 0
+    
+    for (const file of files) {
+      const filePath = join(dirPath, file)
+      const content = readFileSync(filePath, 'utf-8')
+      const lines = content.trim().split('\n').filter(l => l)
+      
+      const filteredLines = lines.filter(line => {
+        try {
+          const entry = JSON.parse(line)
+          const botMsgIds = entry.call?.botMessageIds as string[] | undefined
+          if (botMsgIds && botMsgIds.includes(deletedMessageId)) {
+            totalRemoved++
+            logger.debug({ 
+              toolCallId: entry.call?.id,
+              deletedMessageId 
+            }, 'Removing tool cache entry - bot message deleted')
+            return false  // Remove this entry
+          }
+          return true
+        } catch {
+          return true
+        }
+      })
+      
+      if (filteredLines.length < lines.length) {
+        if (filteredLines.length === 0) {
+          // Delete empty file
+          const { unlinkSync } = require('fs')
+          unlinkSync(filePath)
+        } else {
+          writeFileSync(filePath, filteredLines.join('\n') + '\n')
+        }
+      }
+    }
+    
+    if (totalRemoved > 0) {
+      logger.info({ botId, channelId, deletedMessageId, entriesRemoved: totalRemoved }, 
+        'Removed tool cache entries for deleted bot message')
     }
   }
 

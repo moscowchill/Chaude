@@ -1,12 +1,15 @@
 /**
  * Structured logging with pino
  * Supports per-activation file logging with async context tracking
+ * Also captures logs to the active trace for debugging
  */
 
 import pino from 'pino'
 import { AsyncLocalStorage } from 'async_hooks'
 import { existsSync, mkdirSync, createWriteStream } from 'fs'
 import { join } from 'path'
+import { traceLog, getCurrentTrace } from '../trace/collector.js'
+import type { LogEntry } from '../trace/types.js'
 
 const isDevelopment = process.env.NODE_ENV !== 'production'
 const logDir = process.env.LOG_DIR || './logs/activations'
@@ -50,7 +53,7 @@ const activationContext = new AsyncLocalStorage<ActivationContext>()
 const activationLoggers = new Map<string, { logger: pino.Logger, stream: NodeJS.WritableStream }>()
 
 /**
- * Main logger - routes to console + (activation file OR general file)
+ * Main logger - routes to console + file + trace (if active)
  */
 export const logger = new Proxy(baseLogger, {
   get(target, prop: string) {
@@ -67,6 +70,24 @@ export const logger = new Proxy(baseLogger, {
         } else {
           // Outside activation - log to general file
           (generalFileLogger as any)[prop](...args)
+        }
+        
+        // Also capture to trace if we're inside an activation
+        const trace = getCurrentTrace()
+        if (trace) {
+          // Parse the pino-style arguments
+          // pino allows: logger.info(obj, msg) or logger.info(msg)
+          let message: string
+          let data: Record<string, unknown> | undefined
+          
+          if (typeof args[0] === 'object' && args[0] !== null) {
+            data = args[0] as Record<string, unknown>
+            message = args[1] || ''
+          } else {
+            message = String(args[0] || '')
+          }
+          
+          traceLog(prop as LogEntry['level'], message, data)
         }
       }
     }

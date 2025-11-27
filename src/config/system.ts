@@ -33,7 +33,7 @@ export class ConfigSystem {
       this.loadGuildConfig(guildId),
       this.loadBotConfig(botName),
       this.loadBotGuildConfig(botName, guildId),
-      ...channelConfigs.map((yaml) => this.parseChannelConfig(yaml)),
+      ...channelConfigs.map((yaml) => this.parseChannelConfig(yaml, botName)),
     ]
 
     // Merge all configs
@@ -79,9 +79,20 @@ export class ConfigSystem {
     )
   }
 
-  private parseChannelConfig(yamlString: string): Partial<BotConfig> {
+  private parseChannelConfig(yamlString: string, botName: string): Partial<BotConfig> {
     try {
-      return YAML.parse(yamlString) || {}
+      const config = YAML.parse(yamlString) || {}
+      
+      // If config has a target field, only apply if it matches this bot
+      if (config.target && config.target !== botName) {
+        logger.debug({ target: config.target, botName }, 'Skipping config with different target')
+        return {}
+      }
+      
+      // Remove target field from config (it's metadata, not a config value)
+      delete config.target
+      
+      return config
     } catch (error) {
       logger.warn({ error, yaml: yamlString }, 'Failed to parse channel config')
       return {}
@@ -135,6 +146,8 @@ export class ConfigSystem {
 
       // Model config
       mode: config.mode || 'prefill',
+      prefill_thinking: config.prefill_thinking || false,
+      debug_thinking: config.debug_thinking || false,
       continuation_model: config.continuation_model || '',
       temperature: config.temperature ?? 1.0,
       max_tokens: config.max_tokens || 4096,
@@ -157,6 +170,7 @@ export class ConfigSystem {
       tool_output_visible: config.tool_output_visible ?? false,
       max_tool_depth: config.max_tool_depth || 100,
       mcp_servers: config.mcp_servers,
+      tool_plugins: config.tool_plugins || [],
 
       // Stop sequences
       stop_sequences: config.stop_sequences || [],

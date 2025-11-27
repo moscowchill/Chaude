@@ -480,7 +480,7 @@ export class DiscordConnector {
         const batchSize = Math.min(100, maxMessages - allMessages.length)
         const fetched = await channel.messages.fetch({ 
           limit: batchSize, 
-          before: currentBefore 
+          before: currentBefore
         })
 
         if (fetched.size === 0) break
@@ -579,6 +579,56 @@ export class DiscordConnector {
   }
 
   /**
+   * Send a message with a text file attachment
+   * Used for long content that shouldn't be split
+   */
+  async sendMessageWithAttachment(
+    channelId: string, 
+    content: string, 
+    attachment: { name: string; content: string },
+    replyToMessageId?: string
+  ): Promise<string[]> {
+    return retryDiscord(async () => {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      if (!channel || !channel.isTextBased()) {
+        throw new DiscordError(`Channel ${channelId} not found`)
+      }
+
+      const options: any = {
+        content,
+        files: [{
+          name: attachment.name,
+          attachment: Buffer.from(attachment.content, 'utf-8'),
+        }],
+      }
+
+      if (replyToMessageId) {
+        try {
+          options.reply = { messageReference: replyToMessageId }
+          const sent = await channel.send(options)
+          logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
+          return [sent.id]
+        } catch (error: any) {
+          // If reply fails (message deleted), send without reply
+          if (error.code === 10008 || error.message?.includes('Unknown message')) {
+            logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
+            delete options.reply
+            const sent = await channel.send(options)
+            return [sent.id]
+          } else {
+            throw error
+          }
+        }
+      } else {
+        const sent = await channel.send(options)
+        logger.debug({ channelId, attachmentName: attachment.name }, 'Sent message with attachment')
+        return [sent.id]
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
    * Send a webhook message
    * For tool output, creates/reuses a webhook in the channel
    */
@@ -613,6 +663,23 @@ export class DiscordConnector {
       })
 
       logger.debug({ channelId, username }, 'Sent webhook message')
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Pin a message in a channel
+   */
+  async pinMessage(channelId: string, messageId: string): Promise<void> {
+    return retryDiscord(async () => {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      if (!channel || !channel.isTextBased()) {
+        throw new DiscordError(`Channel ${channelId} not found`)
+      }
+
+      const message = await channel.messages.fetch(messageId)
+      await message.pin()
+      logger.debug({ channelId, messageId }, 'Pinned message')
     }, this.options.maxBackoffMs)
   }
 
@@ -806,11 +873,24 @@ export class DiscordConnector {
 
     for (const msg of messages) {
       // Look for .config messages
+      // Format: .config [target]
+      //         ---
+      //         yaml content
       if (msg.content.startsWith('.config')) {
         const lines = msg.content.split('\n')
         if (lines.length > 2 && lines[1] === '---') {
+          // Extract target from first line (space-separated after .config)
+          const firstLine = lines[0]!
+          const target = firstLine.slice('.config'.length).trim() || undefined
+          
           const yaml = lines.slice(2).join('\n')
-          configs.push(yaml)
+          
+          // Prepend target to YAML if present
+          if (target) {
+            configs.push(`target: ${target}\n${yaml}`)
+          } else {
+            configs.push(yaml)
+          }
         }
       }
     }

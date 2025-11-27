@@ -8,6 +8,7 @@ import { join } from 'path'
 import { LLMProvider, ProviderRequest } from '../middleware.js'
 import { LLMCompletion, ContentBlock, LLMError } from '../../types.js'
 import { logger } from '../../utils/logger.js'
+import { getCurrentTrace } from '../../trace/index.js'
 
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
@@ -20,8 +21,12 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async complete(request: ProviderRequest): Promise<LLMCompletion> {
+    const trace = getCurrentTrace()
+    const callId = trace?.startLLMCall(trace.getLLMCallCount())
+    const startTime = Date.now()
+    
     try {
-      logger.debug({ model: request.model }, 'Calling Anthropic API')
+      logger.debug({ model: request.model, traceId: trace?.getTraceId() }, 'Calling Anthropic API')
 
       // Extract system messages and convert to top-level parameter
       const systemMessages = request.messages
@@ -50,18 +55,21 @@ export class AnthropicProvider implements LLMProvider {
         params.tools = request.tools
       }
 
-      // Log request to file
-      this.logRequestToFile(params)
+      // Log request to file (and get ref for trace)
+      const requestRef = this.logRequestToFile(params)
 
       const response = await this.client.messages.create(params)
 
-      // Log response to file
-      this.logResponseToFile(response)
+      // Log response to file (and get ref for trace)
+      const responseRef = this.logResponseToFile(response)
 
+      const durationMs = Date.now() - startTime
+      
       logger.debug({ 
         stopReason: response.stop_reason,
         contentBlocks: response.content.length,
-        firstBlock: response.content[0]?.type
+        firstBlock: response.content[0]?.type,
+        durationMs,
       }, 'Received Anthropic response')
 
       // Parse response
@@ -80,6 +88,45 @@ export class AnthropicProvider implements LLMProvider {
         return { type: 'text', text: JSON.stringify(block) }
       })
 
+      // Calculate text length for trace
+      const textLength = content
+        .filter(c => c.type === 'text')
+        .reduce((sum, c) => sum + ((c as any).text?.length || 0), 0)
+      const toolUseCount = content.filter(c => c.type === 'tool_use').length
+
+      // Record to trace
+      if (trace && callId) {
+        trace.completeLLMCall(
+          callId,
+          {
+            messageCount: request.messages.length,
+            systemPromptLength: systemMessages.length,
+            hasTools: !!(request.tools && request.tools.length > 0),
+            toolCount: request.tools?.length || 0,
+            temperature: request.temperature,
+            maxTokens: request.max_tokens,
+            stopSequences: request.stop_sequences,
+          },
+          {
+            stopReason: this.mapStopReason(response.stop_reason),
+            contentBlocks: response.content.length,
+            textLength,
+            toolUseCount,
+          },
+          {
+            inputTokens: response.usage.input_tokens,
+            outputTokens: response.usage.output_tokens,
+            cacheCreationTokens: (response.usage as any).cache_creation_input_tokens,
+            cacheReadTokens: (response.usage as any).cache_read_input_tokens,
+          },
+          response.model,
+          {
+            requestBodyRef: requestRef,
+            responseBodyRef: responseRef,
+          }
+        )
+      }
+
       return {
         content,
         stopReason: this.mapStopReason(response.stop_reason),
@@ -93,6 +140,13 @@ export class AnthropicProvider implements LLMProvider {
         raw: response,
       }
     } catch (error) {
+      // Record error to trace
+      if (trace && callId) {
+        trace.failLLMCall(callId, {
+          message: error instanceof Error ? error.message : String(error),
+          retryCount: 0,
+        })
+      }
       logger.error({ error }, 'Anthropic API error')
       throw new LLMError('Anthropic API call failed', error)
     }
@@ -113,7 +167,7 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
-  private logRequestToFile(params: any): void {
+  private logRequestToFile(params: any): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-requests')
       if (!existsSync(dir)) {
@@ -121,16 +175,19 @@ export class AnthropicProvider implements LLMProvider {
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const filename = join(dir, `request-${timestamp}.json`)
+      const basename = `request-${timestamp}.json`
+      const filename = join(dir, basename)
 
       writeFileSync(filename, JSON.stringify(params, null, 2))
       logger.debug({ filename }, 'Logged request to file')
+      return basename
     } catch (error) {
       logger.warn({ error }, 'Failed to log request to file')
+      return undefined
     }
   }
 
-  private logResponseToFile(response: any): void {
+  private logResponseToFile(response: any): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-responses')
       if (!existsSync(dir)) {
@@ -138,12 +195,15 @@ export class AnthropicProvider implements LLMProvider {
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const filename = join(dir, `response-${timestamp}.json`)
+      const basename = `response-${timestamp}.json`
+      const filename = join(dir, basename)
 
       writeFileSync(filename, JSON.stringify(response, null, 2))
       logger.debug({ filename }, 'Logged response to file')
+      return basename
     } catch (error) {
       logger.warn({ error }, 'Failed to log response to file')
+      return undefined
     }
   }
 }

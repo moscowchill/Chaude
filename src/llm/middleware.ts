@@ -165,8 +165,12 @@ export class LLMMiddleware {
         // Bot continuation - don't add prefix, just complete from where we are
         continue
       } else if (isLastMessage && isEmpty) {
-        // Completion target
-        currentConversation.push(`${msg.participant}:`)
+        // Completion target - optionally start with thinking tag
+        if (request.config.prefill_thinking) {
+          currentConversation.push(`${msg.participant}: <thinking>`)
+        } else {
+          currentConversation.push(`${msg.participant}:`)
+        }
       } else if (formatted.text) {
         // Regular message
         currentConversation.push(`${msg.participant}: ${formatted.text}`)
@@ -178,9 +182,9 @@ export class LLMMiddleware {
     
     // Flush any remaining conversation, but split to insert tools near the end
     if (currentConversation.length > 0) {
-      // Insert tools 2-3 messages from the end (before last few messages)
-      if (request.tools && request.tools.length > 0 && currentConversation.length > 3) {
-        const splitPoint = currentConversation.length - 3
+      // Insert tools ~10 messages from the end (before last few messages)
+      if (request.tools && request.tools.length > 0 && currentConversation.length > 10) {
+        const splitPoint = currentConversation.length - 10
         const beforeTools = currentConversation.slice(0, splitPoint)
         const afterTools = currentConversation.slice(splitPoint)
         
@@ -329,19 +333,129 @@ export class LLMMiddleware {
 
   private formatToolsForPrefill(tools: any[]): string {
     const formatted = tools.map((tool) => {
-      const params = JSON.stringify(tool.inputSchema.properties || {}, null, 2)
-      return `- ${tool.name}: ${tool.description}\n  Input schema: ${params}`
+      // Generate concise description: strip fluff, keep first sentence, max ~60 chars
+      const desc = this.conciseDescription(tool.description)
+      
+      // Generate example from schema
+      const example = this.schemaToExample(tool.inputSchema)
+      const exampleStr = JSON.stringify(example)
+      
+      return `${tool.name} - ${desc}\n  <${tool.name}>${exampleStr}</${tool.name}>`
     })
 
     return `<tools>
-You have access to the following tools. To use a tool, output it in XML format:
-<tool_name>{"param": "value"}</tool_name>
+${formatted.join('\n')}
 
-The tool results will be provided by the System participant.
-
-Available tools:
-${formatted.join('\n\n')}
+To escape a tool call (show without executing), wrap in backticks: \`<tool>{}\`
 </tools>`
+  }
+  
+  private conciseDescription(desc: string): string {
+    if (!desc) return ''
+    
+    // Take first sentence
+    let result = desc.split(/[.!]/)[0] || desc
+    
+    // Remove fluff phrases
+    const fluff = [
+      /^(This tool |Tool to |A tool that |Allows you to |Used to |Use this to )/i,
+      /\s*(using|via|through) the \w+ API/gi,
+      /\s*and returns? .*$/i,
+    ]
+    for (const pattern of fluff) {
+      result = result.replace(pattern, '')
+    }
+    
+    // Trim and capitalize
+    result = result.trim()
+    if (result.length > 80) {
+      result = result.slice(0, 77) + '...'
+    }
+    
+    return result
+  }
+  
+  private schemaToExample(schema: any): any {
+    if (!schema) return {}
+    
+    const props = schema.properties || {}
+    const required = schema.required || []
+    
+    // Only include required props, or first 2 if none required
+    const propsToInclude = required.length > 0 
+      ? required 
+      : Object.keys(props).slice(0, 2)
+    
+    const example: any = {}
+    for (const key of propsToInclude) {
+      const propSchema = props[key]
+      if (propSchema) {
+        example[key] = this.schemaValueExample(propSchema, key)
+      }
+    }
+    
+    return example
+  }
+  
+  private schemaValueExample(schema: any, name: string): any {
+    if (!schema) return '...'
+    
+    const type = schema.type
+    
+    // Check for enum - use first value
+    if (schema.enum && schema.enum.length > 0) {
+      return schema.enum[0]
+    }
+    
+    // Check description for examples like "e.g., system, user, assistant"
+    const desc = schema.description || ''
+    const egMatch = desc.match(/e\.?g\.?,?\s*['"]?(\w+)['"]?/i)
+    if (egMatch && type === 'string') {
+      return egMatch[1]
+    }
+    
+    switch (type) {
+      case 'string':
+        // Use contextual placeholder based on name
+        if (name.includes('url') || name.includes('path')) return 'https://...'
+        if (name.includes('query') || name.includes('question') || name.includes('content')) return '...'
+        if (name.includes('name')) return 'example'
+        return '...'
+      
+      case 'number':
+      case 'integer':
+        return 1
+      
+      case 'boolean':
+        return true
+      
+      case 'array':
+        // Generate one example item
+        const itemSchema = schema.items
+        if (itemSchema) {
+          return [this.schemaValueExample(itemSchema, name)]
+        }
+        return ['...']
+      
+      case 'object':
+        // Recurse into nested object
+        const nestedProps = schema.properties || {}
+        const nestedRequired = schema.required || []
+        const nestedKeys = nestedRequired.length > 0 
+          ? nestedRequired.slice(0, 3)
+          : Object.keys(nestedProps).slice(0, 3)
+        
+        const obj: any = {}
+        for (const k of nestedKeys) {
+          if (nestedProps[k]) {
+            obj[k] = this.schemaValueExample(nestedProps[k], k)
+          }
+        }
+        return obj
+      
+      default:
+        return '...'
+    }
   }
 }
 
