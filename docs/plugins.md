@@ -266,3 +266,4 @@ export const availablePlugins: Record<string, ToolPlugin> = {
 4. **Consider depth carefully**: Too shallow = noise, too deep = may be truncated
 5. **Test with traces**: Use the debug API to verify injection positions
 
+
