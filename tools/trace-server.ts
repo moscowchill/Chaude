@@ -884,6 +884,8 @@ const HTML = `<!DOCTYPE html>
                   <span>Duration: \${formatDuration(call.durationMs)}</span>
                   <span>Input: \${formatTokens(call.tokenUsage.inputTokens)}</span>
                   <span>Output: \${formatTokens(call.tokenUsage.outputTokens)}</span>
+                  \${call.tokenUsage.cacheReadTokens ? \`<span style="color: #10b981;">Cache read: \${formatTokens(call.tokenUsage.cacheReadTokens)}</span>\` : ''}
+                  \${call.tokenUsage.cacheCreationTokens ? \`<span style="color: #f59e0b;">Cache created: \${formatTokens(call.tokenUsage.cacheCreationTokens)}</span>\` : ''}
                   <span>Stop: \${call.response.stopReason}</span>
                   \${call.response.toolUseCount > 0 ? \`<span>Tools: \${call.response.toolUseCount}</span>\` : ''}
                 </div>

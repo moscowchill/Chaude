@@ -105,7 +105,14 @@ export class LLMMiddleware {
     const messages: ProviderMessage[] = []
     const botName = request.config.botInnerName
     let lastNonEmptyParticipant: string | null = null
-    let currentConversation: string[] = []
+    
+    // Track conversation lines for current section
+    let currentConversation: Array<{ text: string }> = []
+    
+    // Track cache marker GLOBALLY across all flushes (not reset on image flush)
+    // Everything BEFORE we see the marker gets cache_control
+    // Everything AFTER (including the section containing it) does NOT
+    let passedCacheMarker = false
     
     // Add system prompt if present
     if (request.system_prompt) {
@@ -121,6 +128,7 @@ export class LLMMiddleware {
       const formatted = this.formatContentForPrefill(msg.content, msg.participant)
       const hasImages = formatted.images.length > 0
       const isEmpty = !formatted.text.trim() && !hasImages
+      const hasCacheMarker = !!msg.cacheControl
       
       // Don't insert tools yet - we'll add them near the end
       
@@ -128,9 +136,15 @@ export class LLMMiddleware {
       if (hasImages && !isEmpty) {
         // Flush current assistant conversation
         if (currentConversation.length > 0) {
+          const content = currentConversation.map(e => e.text).join('\n')
           messages.push({
             role: 'assistant',
-            content: currentConversation.join('\n'),
+            // TODO: Re-enable prompt caching later
+            // Apply cache_control if we haven't passed the marker yet
+            // content: !passedCacheMarker 
+            //   ? [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }]
+            //   : content,
+            content,
           })
           currentConversation = []
         }
@@ -156,6 +170,23 @@ export class LLMMiddleware {
         continue
       }
       
+      // Check if this message has the cache marker - switch to uncached mode AFTER this
+      // TODO: Re-enable prompt caching later
+      if (hasCacheMarker && !passedCacheMarker) {
+        // Flush everything before this message (cache_control disabled for now)
+        if (currentConversation.length > 0) {
+          const content = currentConversation.map(e => e.text).join('\n')
+          messages.push({
+            role: 'assistant',
+            // content: [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }],
+            content,
+          })
+          currentConversation = []
+        }
+        passedCacheMarker = true
+        logger.debug({ messageIndex: i, totalMessages: request.messages.length }, 'Cache marker found (caching disabled)')
+      }
+      
       // Check bot continuation logic
       const isBotMessage = msg.participant === botName
       const hasToolResult = msg.content.some(c => c.type === 'tool_result')
@@ -167,32 +198,34 @@ export class LLMMiddleware {
       } else if (isLastMessage && isEmpty) {
         // Completion target - optionally start with thinking tag
         if (request.config.prefill_thinking) {
-          currentConversation.push(`${msg.participant}: <thinking>`)
+          currentConversation.push({ text: `${msg.participant}: <thinking>` })
         } else {
-        currentConversation.push(`${msg.participant}:`)
+          currentConversation.push({ text: `${msg.participant}:` })
         }
       } else if (formatted.text) {
         // Regular message
-        currentConversation.push(`${msg.participant}: ${formatted.text}`)
+        currentConversation.push({ text: `${msg.participant}: ${formatted.text}` })
         if (!hasToolResult) {
           lastNonEmptyParticipant = msg.participant
         }
       }
     }
     
-    // Flush any remaining conversation, but split to insert tools near the end
+    // Flush any remaining conversation, insert tools near end
+    // Note: By this point, we've already passed the cache marker (if any),
+    // so all remaining content is uncached
     if (currentConversation.length > 0) {
-      // Insert tools ~10 messages from the end (before last few messages)
       if (request.tools && request.tools.length > 0 && currentConversation.length > 10) {
+        // Insert tools ~10 messages from the end
         const splitPoint = currentConversation.length - 10
         const beforeTools = currentConversation.slice(0, splitPoint)
         const afterTools = currentConversation.slice(splitPoint)
         
-        // Add conversation before tools (single newline separators)
+        // Add content before tools (no cache_control - we're past the marker)
         if (beforeTools.length > 0) {
           messages.push({
             role: 'assistant',
-            content: beforeTools.join('\n'),
+            content: beforeTools.map(e => e.text).join('\n'),
           })
         }
         
@@ -202,18 +235,18 @@ export class LLMMiddleware {
           content: this.formatToolsForPrefill(request.tools),
         })
         
-        // Add last few messages after tools (single newline separators)
+        // Add content after tools
         if (afterTools.length > 0) {
           messages.push({
             role: 'assistant',
-            content: afterTools.join('\n'),
+            content: afterTools.map(e => e.text).join('\n'),
           })
         }
       } else {
-        // Short conversation, just add everything (single newline separators)
+        // Short conversation - just add everything (no cache_control - we're past marker or none exists)
         messages.push({
           role: 'assistant',
-          content: currentConversation.join('\n'),
+          content: currentConversation.map(e => e.text).join('\n'),
         })
       }
     }

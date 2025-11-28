@@ -125,11 +125,14 @@ export class ContextBuilder {
       messagesSinceRoll,
       config
     )
-    participantMessages.length = 0
-    participantMessages.push(...finalMessages)
+    // Only update if a different array was returned (truncation happened)
+    if (finalMessages !== participantMessages) {
+      participantMessages.length = 0
+      participantMessages.push(...finalMessages)
+    }
 
     // 6. Determine cache marker
-    const cacheMarker = this.determineCacheMarker(messages, lastCacheMarker, didTruncate)
+    const cacheMarker = this.determineCacheMarker(messages, lastCacheMarker, didTruncate, config.rolling_threshold)
 
     // Apply cache marker to appropriate message
     if (cacheMarker) {
@@ -393,18 +396,13 @@ export class ContextBuilder {
   ): { messages: ParticipantMessage[], didTruncate: boolean, messagesRemoved?: number } {
     const shouldRoll = messagesSinceRoll >= config.rolling_threshold
     
-    // Calculate total size of FINAL context (text + images + tool results)
+    // Calculate total size of FINAL context (text + tool results only)
+    // Images are NOT counted here - they have separate limits (max_images, 3MB total)
     let totalChars = 0
     for (const msg of messages) {
       for (const block of msg.content) {
         if (block.type === 'text') {
           totalChars += (block as any).text.length
-        } else if (block.type === 'image') {
-          // Base64 data counts toward payload size
-          const imageBlock = block as any
-          if (imageBlock.source?.data) {
-            totalChars += imageBlock.source.data.length
-          }
         } else if (block.type === 'tool_result') {
           const toolBlock = block as any
           const content = typeof toolBlock.content === 'string' 
@@ -412,6 +410,7 @@ export class ContextBuilder {
             : JSON.stringify(toolBlock.content)
           totalChars += content.length
         }
+        // Images not counted - handled separately with max_images and 3MB size limit
       }
     }
     
@@ -535,7 +534,8 @@ export class ContextBuilder {
   private determineCacheMarker(
     messages: DiscordMessage[],
     lastMarker: string | null,
-    didRoll: boolean
+    didRoll: boolean,
+    _rollingThreshold: number = 50
   ): string | null {
     if (messages.length === 0) {
       return null
@@ -545,15 +545,30 @@ export class ContextBuilder {
     if (!didRoll && lastMarker) {
       const markerStillExists = messages.some((m) => m.id === lastMarker)
       if (markerStillExists) {
+        logger.debug({ lastMarker, messagesLength: messages.length }, 'Keeping existing cache marker')
         return lastMarker
       }
     }
 
     // If we rolled or marker is invalid, place new marker
-    // Place marker 5 messages from the end, or at the oldest message
-    const offset = 5
-    const index = Math.max(0, messages.length - offset)
-    return messages[index]!.id
+    // Place marker at: length - buffer (~20 messages from end)
+    // This ensures:
+    // 1. Initially after roll: ~20 recent messages uncached (for dynamic content)
+    // 2. As messages accumulate: uncached grows (20 → 30 → ... → 70 at next roll)
+    // 3. Cached portion stays STABLE until next roll
+    const buffer = 20
+    const index = Math.max(0, messages.length - buffer)
+    
+    const markerId = messages[index]!.id
+    logger.debug({ 
+      index, 
+      messagesLength: messages.length, 
+      buffer,
+      markerId,
+      didRoll
+    }, 'Setting new cache marker')
+    
+    return markerId
   }
 
   private formatMessages(
@@ -568,8 +583,6 @@ export class ContextBuilder {
     
     // Track image count and total base64 payload size to stay under API limits
     // Anthropic has ~10MB total request limit, we want to keep images under 3-4MB
-    let imageCount = 0
-    let totalBase64Size = 0
     const max_images = config.max_images || 5
     const maxTotalBase64Bytes = 3 * 1024 * 1024  // 3 MB total base64 data for images
     
@@ -582,6 +595,45 @@ export class ContextBuilder {
       maxTotalImageMB: maxTotalBase64Bytes / 1024 / 1024
     }, 'Starting formatMessages with images')
 
+    // PRE-SELECT which messages get images by iterating BACKWARDS (newest first)
+    // This ensures recent images take priority over old ones
+    const messagesWithImages = new Set<string>()
+    if (config.include_images) {
+      let imageCount = 0
+      let totalBase64Size = 0
+      
+      for (let i = messages.length - 1; i >= 0 && imageCount < max_images; i--) {
+        const msg = messages[i]!
+        for (const attachment of msg.attachments) {
+          if (imageCount >= max_images) break
+          
+          if (attachment.contentType?.startsWith('image/')) {
+            const cached = imageMap.get(attachment.url)
+            if (cached) {
+              const base64Size = cached.data.toString('base64').length
+              
+              if (totalBase64Size + base64Size <= maxTotalBase64Bytes) {
+                messagesWithImages.add(msg.id)
+                imageCount++
+                totalBase64Size += base64Size
+                logger.debug({ 
+                  messageId: msg.id,
+                  imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
+                  totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
+                  imageCount
+                }, 'Pre-selected image (newest-first)')
+              }
+            }
+          }
+        }
+      }
+      logger.debug({ 
+        selectedCount: messagesWithImages.size, 
+        totalMB: (totalBase64Size / 1024 / 1024).toFixed(2) 
+      }, 'Pre-selected images for inclusion')
+    }
+
+    // Now process messages in order, only including pre-selected images
     for (const msg of messages) {
       const content: ContentBlock[] = []
 
@@ -593,41 +645,16 @@ export class ContextBuilder {
         })
       }
 
-      // Add image content (if enabled and within limits)
-      if (config.include_images && msg.attachments.length > 0 && imageCount < max_images) {
-        logger.debug({ messageId: msg.id, attachments: msg.attachments.length }, 'Processing attachments for message')
+      // Add image content only for pre-selected messages
+      if (config.include_images && messagesWithImages.has(msg.id)) {
+        logger.debug({ messageId: msg.id, attachments: msg.attachments.length }, 'Adding pre-selected images for message')
         
         for (const attachment of msg.attachments) {
-          if (imageCount >= max_images) {
-            logger.debug({ max_images, currentCount: imageCount }, 'Reached max_images count limit, skipping remaining images')
-            break
-          }
-          
           if (attachment.contentType?.startsWith('image/')) {
             const cached = imageMap.get(attachment.url)
             
             if (cached) {
               const base64Data = cached.data.toString('base64')
-              const base64Size = base64Data.length
-              
-              // Check if adding this image would exceed total size limit
-              if (totalBase64Size + base64Size > maxTotalBase64Bytes) {
-                logger.warn({ 
-                  currentTotalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
-                  imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
-                  maxTotalMB: (maxTotalBase64Bytes / 1024 / 1024).toFixed(1),
-                  imageCount,
-                  url: attachment.url
-                }, 'Skipping image - would exceed total size limit')
-                break  // Stop adding more images
-              }
-              
-              logger.debug({ 
-                url: attachment.url, 
-                imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
-                currentImageCount: imageCount,
-                currentTotalMB: (totalBase64Size / 1024 / 1024).toFixed(2)
-              }, 'Adding image to content')
               
               content.push({
                 type: 'image',
@@ -637,14 +664,11 @@ export class ContextBuilder {
                   media_type: cached.mediaType,  // Anthropic API uses snake_case
                 },
               })
-              imageCount++
-              totalBase64Size += base64Size
               
               logger.debug({ 
                 messageId: msg.id, 
-                imageCount, 
-                max_images,
-                totalImageMB: (totalBase64Size / 1024 / 1024).toFixed(2)
+                url: attachment.url,
+                sizeMB: (base64Data.length / 1024 / 1024).toFixed(2)
               }, 'Added image to content')
             }
           }
@@ -858,6 +882,9 @@ export class ContextBuilder {
 
     // Add system message prefixes (bot should never generate these)
     sequences.push('System<[', 'System>[')
+    
+    // Add conversation boundary marker (prevents hallucinating past context end)
+    sequences.push('<<HUMAN_CONVERSATION_END>>')
 
     // Add configured stop sequences
     sequences.push(...config.stop_sequences)
