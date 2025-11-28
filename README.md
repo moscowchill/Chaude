@@ -128,8 +128,7 @@ npm start
 
 - [Architecture](./architecture.md) - Detailed architecture documentation
 - [Requirements](./requirements.md) - Full functional requirements  
-- [Implementation Status](./IMPLEMENTATION_STATUS.md) - Current development status
-- [Outstanding Items](./OUTSTANDING_ITEMS.md) - Prioritized list of remaining tasks
+
 - [Plugins](./docs/plugins.md) - Plugin system documentation
 
 ### Key Components
