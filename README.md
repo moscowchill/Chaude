@@ -128,8 +128,8 @@ npm start
 
 - [Architecture](./architecture.md) - Detailed architecture documentation
 - [Requirements](./requirements.md) - Full functional requirements  
-
 - [Plugins](./docs/plugins.md) - Plugin system documentation
+- [Deployment](./docs/deployment.md) - Production deployment guide
 
 ### Key Components
 
