@@ -1670,8 +1670,10 @@ const server = createServer((req, res) => {
   }
 })
 
-server.listen(PORT, () => {
-  console.log(`\n  🔍 Trace Viewer running at http://localhost:${PORT}\n`)
+const HOST = process.env.HOST || '127.0.0.1'
+
+server.listen(PORT, HOST, () => {
+  console.log(`\n  🔍 Trace Viewer running at http://${HOST}:${PORT}\n`)
   if (AUTH_TOKEN) {
     console.log(`  🔐 Authentication enabled (set AUTH_TOKEN env var)\n`)
   } else {
