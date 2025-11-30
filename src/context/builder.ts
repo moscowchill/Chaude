@@ -61,7 +61,7 @@ export class ContextBuilder {
     // 1. Merge consecutive bot messages (skip when preserve_thinking_context to keep IDs for injection)
     if (!config.preserve_thinking_context) {
       const beforeMerge = messages.length
-      messages = this.mergeConsecutiveBotMessages(messages, config.innerName)
+    messages = this.mergeConsecutiveBotMessages(messages, config.innerName)
       if (messages.length < beforeMerge) {
         // Some messages were merged - track them
         const afterIds = new Set(messages.map(m => m.id))
@@ -136,8 +136,8 @@ export class ContextBuilder {
     )
     // Only update if a different array was returned (truncation happened)
     if (finalMessages !== participantMessages) {
-      participantMessages.length = 0
-      participantMessages.push(...finalMessages)
+    participantMessages.length = 0
+    participantMessages.push(...finalMessages)
     }
 
     // 6. Determine cache marker

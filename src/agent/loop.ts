@@ -471,27 +471,67 @@ export class AgentLoop {
   ): Promise<void> {
     logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId, traceId: trace?.getTraceId() }, 'Bot activated')
 
+    // Profiling helper
+    const timings: Record<string, number> = {}
+    const startProfile = (name: string) => {
+      timings[`_start_${name}`] = Date.now()
+    }
+    const endProfile = (name: string) => {
+      const start = timings[`_start_${name}`]
+      if (start) {
+        timings[name] = Date.now() - start
+        delete timings[`_start_${name}`]
+      }
+    }
+    const profileStart = Date.now()
+
+    startProfile('typing')
     // Start typing indicator
     await this.connector.startTyping(channelId)
+    endProfile('typing')
 
     try {
+      startProfile('toolCacheLoad')
       // 1. Get or initialize channel state first (for message count)
       const toolCacheWithResults = await this.toolSystem.loadCacheWithResults(this.botId, channelId)
       const toolCache = toolCacheWithResults.map(e => e.call)
+      endProfile('toolCacheLoad')
+      
+      startProfile('stateInit')
       const state = await this.stateManager.getOrInitialize(this.botId, channelId, toolCache)
+      endProfile('stateInit')
 
-      // 2. Calculate fetch depth BEFORE fetching (need big enough depth for config too)
-      // Fetch enough messages to include our current context + some buffer
-      let fetchDepth = 500  // Default with buffer for config + context
+      // 2. Calculate fetch depth from config (fetch pinned configs first - fast single API call)
+      startProfile('pinnedConfigFetch')
+      const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
+      const preConfig = this.configSystem.loadConfig({
+        botName: this.botId,
+        guildId,
+        channelConfigs: pinnedConfigs,
+      })
+      endProfile('pinnedConfigFetch')
       
-      // We'll get config from this same fetch, so no need for separate config fetch
+      // Use config values: recency_window + rolling_threshold + buffer for .history commands
+      const recencyWindow = preConfig.recency_window_messages || 200
+      const rollingBuffer = preConfig.rolling_threshold || 50
+      let fetchDepth = recencyWindow + rollingBuffer + 50  // +50 for .history boundary tolerance
       
-      // 3. Fetch context ONCE with calculated depth (gets messages + pinned configs + images)
+      logger.debug({ 
+        recencyWindow, 
+        rollingBuffer, 
+        fetchDepth,
+        configSource: 'pinned + bot yaml'
+      }, 'Calculated fetch depth from config')
+      
+      startProfile('fetchContext')
+      // 3. Fetch context with calculated depth (messages + images), reusing pinned configs
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
         authorized_roles: [],  // Will apply after loading config
+        pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
       })
+      endProfile('fetchContext')
       
       // Record raw Discord messages to trace (before any transformation)
       if (trace) {
@@ -516,20 +556,25 @@ export class AgentLoop {
         traceRawDiscordMessages(rawMessages)
       }
       
+      startProfile('configLoad')
       // 4. Load configuration from the fetched pinned messages
       const config = this.configSystem.loadConfig({
         botName: this.botId,
         guildId: discordContext.guildId,
         channelConfigs: discordContext.pinnedConfigs,
       })
+      endProfile('configLoad')
 
       // Initialize MCP servers from config (once per bot)
       if (!this.mcpInitialized && config.mcp_servers && config.mcp_servers.length > 0) {
+        startProfile('mcpInit')
         logger.info({ serverCount: config.mcp_servers.length }, 'Initializing MCP servers from config')
         await this.toolSystem.initializeServers(config.mcp_servers)
         this.mcpInitialized = true
+        endProfile('mcpInit')
       }
       
+      startProfile('pluginSetup')
       // Load tool plugins from config
       if (config.tool_plugins && config.tool_plugins.length > 0) {
         this.toolSystem.loadPlugins(config.tool_plugins)
@@ -549,6 +594,7 @@ export class AgentLoop {
           await this.connector.pinMessage(channelId, messageId)
         },
       })
+      endProfile('pluginSetup')
 
       // Filter out "m " command messages from context (they should be deleted but might still be fetched)
       const originalCount = discordContext.messages.length
@@ -572,6 +618,7 @@ export class AgentLoop {
       
       // 4b. Re-load tool cache filtering by existing Discord messages
       // (removes entries where bot messages were deleted)
+      startProfile('toolCacheReload')
       const existingMessageIds = new Set(discordContext.messages.map(m => m.id))
       const filteredToolCache = await this.toolSystem.loadCacheWithResults(
         this.botId, 
@@ -579,6 +626,7 @@ export class AgentLoop {
         existingMessageIds
       )
       const toolCacheForContext = filteredToolCache
+      endProfile('toolCacheReload')
       
       // 4c. Filter out Discord messages that are in tool cache's botMessageIds
       // ONLY when preserve_thinking_context is DISABLED
@@ -610,17 +658,20 @@ export class AgentLoop {
       // 4d. Load activations for preserve_thinking_context
       let activationsForContext: Activation[] | undefined
       if (config.preserve_thinking_context) {
+        startProfile('activationsLoad')
         activationsForContext = await this.activationStore.loadActivationsForChannel(
           this.botId,
           channelId,
           existingMessageIds
         )
+        endProfile('activationsLoad')
         logger.debug({ 
           activationCount: activationsForContext.length 
         }, 'Loaded activations for context')
       }
 
       // 4e. Gather plugin context injections
+      startProfile('pluginInjections')
       let pluginInjections: ContextInjection[] = []
       const loadedPlugins = this.toolSystem.getLoadedPluginObjects()
       if (loadedPlugins.size > 0) {
@@ -679,8 +730,10 @@ export class AgentLoop {
         // Set plugin context factory for tool execution hooks (each plugin gets its own context)
         this.toolSystem.setPluginContextFactory(pluginContextFactory, config.plugin_config)
       }
+      endProfile('pluginInjections')
 
       // 5. Build LLM context
+      startProfile('contextBuild')
       const buildParams: BuildContextParams = {
         discordContext,
         toolCacheWithResults: toolCacheForContext,  // Use filtered version (excludes deleted bot messages)
@@ -697,6 +750,7 @@ export class AgentLoop {
       if (config.tools_enabled) {
         contextResult.request.tools = this.toolSystem.getAvailableTools()
       }
+      endProfile('contextBuild')
 
       // 5.5. Start activation recording if preserve_thinking_context is enabled
       let activation: Activation | undefined
@@ -712,7 +766,17 @@ export class AgentLoop {
         )
       }
 
+      // Log profiling BEFORE LLM call to see pre-LLM timings
+      const preLlmTime = Date.now() - profileStart
+      logger.info({ 
+        ...timings, 
+        totalPreLLM: preLlmTime,
+        messagesFetched: discordContext.messages.length,
+        imagesFetched: discordContext.images.length,
+      }, '⏱️  PROFILING: Pre-LLM phase timings (ms)')
+
       // 6. Call LLM (with tool loop)
+      startProfile('llmCall')
       const { completion, toolCallIds, preambleMessageIds } = await this.executeWithTools(
         contextResult.request, 
         config, 
@@ -720,6 +784,7 @@ export class AgentLoop {
         triggeringMessageId || '',
         activation?.id
       )
+      endProfile('llmCall')
 
       // 7. Stop typing
       await this.connector.stopTyping(channelId)
@@ -947,10 +1012,10 @@ export class AgentLoop {
 
       // Get full completion text for recording
       const fullCompletionText = completion.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
-        .join('\n')
-
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('\n')
+        
       // Check for tool use (native tool_use blocks in chat mode)
       let toolUseBlocks = completion.content.filter((c) => c.type === 'tool_use')
 

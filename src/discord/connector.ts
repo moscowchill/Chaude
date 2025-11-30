@@ -4,7 +4,7 @@
  */
 
 import { Client, GatewayIntentBits, Message, TextChannel } from 'discord.js'
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
 import { EventQueue } from '../agent/event-queue.js'
@@ -29,12 +29,15 @@ export interface FetchContextParams {
   targetMessageId?: string  // Optional: Fetch backward from this message ID (for API range queries)
   firstMessageId?: string  // Optional: Stop when this message is encountered
   authorized_roles?: string[]
+  pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
 }
 
 export class DiscordConnector {
   private client: Client
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
+  private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
+  private urlMapPath: string  // Path to URL map file
 
   constructor(
     private queue: EventQueue,
@@ -54,6 +57,43 @@ export class DiscordConnector {
     // Ensure cache directory exists
     if (!existsSync(options.cacheDir)) {
       mkdirSync(options.cacheDir, { recursive: true })
+    }
+    
+    // Load URL to filename map for persistent disk cache
+    this.urlMapPath = join(options.cacheDir, 'url-map.json')
+    this.loadUrlMap()
+  }
+  
+  /**
+   * Load URL to filename mapping from disk (enables persistent image cache)
+   */
+  private loadUrlMap(): void {
+    try {
+      if (existsSync(this.urlMapPath)) {
+        const data = readFileSync(this.urlMapPath, 'utf-8')
+        const map = JSON.parse(data) as Record<string, string>
+        for (const [url, filename] of Object.entries(map)) {
+          this.urlToFilename.set(url, filename)
+        }
+        logger.debug({ count: this.urlToFilename.size }, 'Loaded image URL map from disk')
+      }
+    } catch (error) {
+      logger.warn({ error }, 'Failed to load image URL map, starting fresh')
+    }
+  }
+  
+  /**
+   * Save URL to filename mapping to disk
+   */
+  private saveUrlMap(): void {
+    try {
+      const map: Record<string, string> = {}
+      for (const [url, filename] of this.urlToFilename) {
+        map[url] = filename
+      }
+      writeFileSync(this.urlMapPath, JSON.stringify(map))
+    } catch (error) {
+      logger.warn({ error }, 'Failed to save image URL map')
     }
   }
 
@@ -97,13 +137,47 @@ export class DiscordConnector {
   }
 
   /**
+   * Fetch just pinned configs from a channel (fast - single API call)
+   * Used to load config BEFORE determining fetch depth
+   */
+  async fetchPinnedConfigs(channelId: string): Promise<string[]> {
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+      if (!channel || !channel.isTextBased()) {
+        return []
+      }
+      const pinnedMessages = await channel.messages.fetchPinned(false)
+      const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+      return this.extractConfigs(sortedPinned)
+    } catch (error) {
+      logger.warn({ error, channelId }, 'Failed to fetch pinned configs')
+      return []
+    }
+  }
+
+  /**
    * Fetch context from Discord (messages, configs, images)
    */
   async fetchContext(params: FetchContextParams): Promise<DiscordContext> {
     const { channelId, depth, targetMessageId, firstMessageId, authorized_roles } = params
 
+    // Profiling helper
+    const timings: Record<string, number> = {}
+    const startProfile = (name: string) => {
+      timings[`_start_${name}`] = Date.now()
+    }
+    const endProfile = (name: string) => {
+      const start = timings[`_start_${name}`]
+      if (start) {
+        timings[name] = Date.now() - start
+        delete timings[`_start_${name}`]
+      }
+    }
+
     return retryDiscord(async () => {
+      startProfile('channelFetch')
       const channel = await this.client.channels.fetch(channelId) as TextChannel
+      endProfile('channelFetch')
 
       if (!channel || !channel.isTextBased()) {
         throw new DiscordError(`Channel ${channelId} not found or not text-based`)
@@ -122,6 +196,7 @@ export class DiscordConnector {
         isThread: channel.isThread()
       }, 'ABOUT TO CALL fetchMessagesRecursive')
       
+      startProfile('messagesFetch')
       let messages = await this.fetchMessagesRecursive(
         channel,
         targetMessageId,
@@ -129,10 +204,12 @@ export class DiscordConnector {
         depth,
         authorized_roles
       )
+      endProfile('messagesFetch')
       
       // For threads: implicitly fetch parent channel context up to the branching point
       // This happens even without an explicit .history message
       if (channel.isThread()) {
+        startProfile('threadParentFetch')
         const thread = channel as any  // Discord.js ThreadChannel
         const parentChannel = thread.parent as TextChannel
         const threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
@@ -163,6 +240,7 @@ export class DiscordConnector {
           // Prepend parent messages (they're older than thread messages)
           messages = [...parentMessages, ...messages]
         }
+        endProfile('threadParentFetch')
       }
       
       // Now trim to firstMessageId if provided (works across all channels after .history)
@@ -198,40 +276,57 @@ export class DiscordConnector {
       
       logger.debug({ finalMessageCount: messages.length }, 'Recursive fetch complete with .history processing')
 
+      startProfile('messageConvert')
       // Convert to our format (with reply username lookup)
       const messageMap = new Map(messages.map(m => [m.id, m]))
       const discordMessages: DiscordMessage[] = messages.map((msg) => this.convertMessage(msg, messageMap))
+      endProfile('messageConvert')
 
+      startProfile('pinnedFetch')
+      // Use pre-fetched pinned configs if provided, otherwise fetch them
+      let pinnedConfigs: string[]
+      if (params.pinnedConfigs) {
+        pinnedConfigs = params.pinnedConfigs
+        logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
+      } else {
       // Fetch pinned messages for config (cache: false to always get fresh data)
       const pinnedMessages = await channel.messages.fetchPinned(false)
       // Sort by ID (oldest first) so newer pins override older ones in merge
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
       logger.debug({ pinnedCount: pinnedMessages.size, pinnedIds: sortedPinned.map(m => m.id) }, 'Fetched pinned messages (sorted oldest-first)')
-      const pinnedConfigs = this.extractConfigs(sortedPinned)
+        pinnedConfigs = this.extractConfigs(sortedPinned)
+      }
+      endProfile('pinnedFetch')
 
+      startProfile('imageCaching')
       // Download and cache images
       const images: CachedImage[] = []
+      let newImagesDownloaded = 0
       logger.debug({ messageCount: messages.length }, 'Checking messages for images')
       
       for (const msg of messages) {
         const attachments = Array.from(msg.attachments.values())
-        /*logger.debug({ 
-          messageId: msg.id, 
-          attachmentCount: attachments.length,
-          types: attachments.map(a => a.contentType)
-        }, 'Message attachments')*/
         
         for (const attachment of attachments) {
           if (attachment.contentType?.startsWith('image/')) {
-            logger.debug({ url: attachment.url, type: attachment.contentType }, 'Caching image')
+            const wasInCache = this.imageCache.has(attachment.url) || this.urlToFilename.has(attachment.url)
             const cached = await this.cacheImage(attachment.url, attachment.contentType)
             if (cached) {
               images.push(cached)
-              logger.debug({ hash: cached.hash, size: cached.data.length }, 'Image cached successfully')
+              if (!wasInCache) {
+                newImagesDownloaded++
+              }
             }
           }
         }
       }
+      
+      // Save URL map once if any new images were downloaded
+      if (newImagesDownloaded > 0) {
+        this.saveUrlMap()
+        logger.debug({ newImagesDownloaded }, 'Saved URL map after new downloads')
+            }
+      endProfile('imageCaching')
       
       logger.debug({ totalImages: images.length }, 'Image caching complete')
 
@@ -244,6 +339,14 @@ export class DiscordConnector {
       if (this.lastHistoryOriginChannelId) {
         inheritanceInfo.historyOriginChannelId = this.lastHistoryOriginChannelId
       }
+
+      // Log fetch timings
+      logger.info({
+        ...timings,
+        messageCount: discordMessages.length,
+        imageCount: images.length,
+        pinnedCount: pinnedConfigs.length,
+      }, '⏱️  PROFILING: fetchContext breakdown (ms)')
 
       return {
         messages: discordMessages,
@@ -771,26 +874,26 @@ export class DiscordConnector {
       }
 
       try {
-        // Get or create webhook for this channel
+      // Get or create webhook for this channel
         const webhooks = await (channel as any).fetchWebhooks()
-        let webhook = webhooks.find((wh) => wh.name === 'Chapter3-Tools')
+      let webhook = webhooks.find((wh) => wh.name === 'Chapter3-Tools')
 
-        if (!webhook) {
-          webhook = await channel.createWebhook({
-            name: 'Chapter3-Tools',
-            reason: 'Tool output display',
-          })
-          logger.debug({ channelId, webhookId: webhook.id }, 'Created webhook')
-        }
-
-        // Send via webhook
-        await webhook.send({
-          content,
-          username,
-          avatarURL: this.client.user?.displayAvatarURL(),
+      if (!webhook) {
+        webhook = await channel.createWebhook({
+          name: 'Chapter3-Tools',
+          reason: 'Tool output display',
         })
+        logger.debug({ channelId, webhookId: webhook.id }, 'Created webhook')
+      }
 
-        logger.debug({ channelId, username }, 'Sent webhook message')
+      // Send via webhook
+      await webhook.send({
+        content,
+        username,
+        avatarURL: this.client.user?.displayAvatarURL(),
+      })
+
+      logger.debug({ channelId, username }, 'Sent webhook message')
       } catch (error: any) {
         // Threads and some channel types don't support webhooks
         // Fall back to regular message
@@ -1165,13 +1268,42 @@ export class DiscordConnector {
   }
 
   private async cacheImage(url: string, contentType: string): Promise<CachedImage | null> {
-    // Check cache
+    // 1. Check in-memory cache (fastest)
     if (this.imageCache.has(url)) {
       return this.imageCache.get(url)!
     }
 
+    // 2. Check disk cache using URL map (avoids download)
+    const cachedFilename = this.urlToFilename.get(url)
+    if (cachedFilename) {
+      const filepath = join(this.options.cacheDir, cachedFilename)
+      if (existsSync(filepath)) {
+        try {
+          const buffer = readFileSync(filepath)
+          const hash = cachedFilename.split('.')[0] || ''
+          const ext = cachedFilename.split('.')[1] || 'jpg'
+          const mediaType = `image/${ext}`
+          
+          const cached: CachedImage = {
+            url,
+            data: buffer,
+            mediaType,
+            hash,
+          }
+          
+          // Store in memory for faster subsequent access
+          this.imageCache.set(url, cached)
+          logger.debug({ url, filename: cachedFilename }, 'Loaded image from disk cache')
+          return cached
+        } catch (error) {
+          logger.warn({ error, url, filepath }, 'Failed to read cached image from disk')
+          // Fall through to download
+        }
+      }
+    }
+
+    // 3. Download image (cache miss)
     try {
-      // Download image
       const response = await fetch(url)
       const buffer = Buffer.from(await response.arrayBuffer())
 
@@ -1183,10 +1315,13 @@ export class DiscordConnector {
       const filename = `${hash}.${ext}`
       const filepath = join(this.options.cacheDir, filename)
 
-      // Save to disk if not exists
+      // Save to disk
       if (!existsSync(filepath)) {
         writeFileSync(filepath, buffer)
       }
+      
+      // Update URL map (will be persisted by caller after batch)
+      this.urlToFilename.set(url, filename)
 
       const cached: CachedImage = {
         url,
@@ -1201,7 +1336,7 @@ export class DiscordConnector {
         url, 
         discordType: contentType, 
         detectedType: actualMediaType 
-      }, 'Cached image with type detection')
+      }, 'Downloaded and cached new image')
 
       return cached
     } catch (error) {
