@@ -207,9 +207,13 @@ export class ConfigSystem {
       max_tool_depth: config.max_tool_depth || 100,
       mcp_servers: config.mcp_servers,
       tool_plugins: config.tool_plugins || [],
+      plugin_config: config.plugin_config,
 
       // Stop sequences
       stop_sequences: config.stop_sequences || [],
+
+      // Chat mode persona
+      chat_persona_prompt: config.chat_persona_prompt ?? true,
 
       // Retries
       llm_retries: config.llm_retries || 3,
