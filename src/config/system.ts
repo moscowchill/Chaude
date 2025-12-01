@@ -42,7 +42,7 @@ export class ConfigSystem {
     ]
 
     // Merge all configs
-    const merged = this.mergeConfigs(configs)
+    const merged = this.mergeConfigs(configs, botName)
 
     // Validate final config
     this.validateConfig(merged)
@@ -148,7 +148,7 @@ export class ConfigSystem {
     }
   }
 
-  private mergeConfigs(configs: Partial<BotConfig>[]): BotConfig {
+  private mergeConfigs(configs: Partial<BotConfig>[], botName: string): BotConfig {
     // Deep merge all configs
     const merged: any = {}
 
@@ -170,14 +170,23 @@ export class ConfigSystem {
     }
 
     // Apply defaults
-    return this.applyDefaults(merged)
+    return this.applyDefaults(merged, botName)
   }
 
-  private applyDefaults(config: Partial<BotConfig>): BotConfig {
+  private applyDefaults(config: Partial<BotConfig>, botName: string): BotConfig {
+    // Resolve path for bot-specific files (system_prompt_file, context_prefix_file)
+    // EMS mode: <EMS_PATH>/<botName>/<file>
+    // Default mode: <CONFIG_PATH>/bots/<file>
+    const resolveBotFilePath = (filename: string): string => {
+      return this.emsMode
+        ? join(this.configBasePath, botName, filename)
+        : join(this.configBasePath, 'bots', filename)
+    }
+
     // Load system prompt from file if specified
     let systemPrompt = config.system_prompt
     if (config.system_prompt_file && !systemPrompt) {
-      const promptPath = join(this.configBasePath, 'bots', config.system_prompt_file)
+      const promptPath = resolveBotFilePath(config.system_prompt_file)
       if (existsSync(promptPath)) {
         systemPrompt = readFileSync(promptPath, 'utf-8')
         logger.info({ path: promptPath, length: systemPrompt.length }, 'Loaded system prompt from file')
@@ -189,7 +198,7 @@ export class ConfigSystem {
     // Load context prefix from file if specified (inserted as first cached assistant message)
     let contextPrefix = config.context_prefix
     if (config.context_prefix_file && !contextPrefix) {
-      const prefixPath = join(this.configBasePath, 'bots', config.context_prefix_file)
+      const prefixPath = resolveBotFilePath(config.context_prefix_file)
       if (existsSync(prefixPath)) {
         contextPrefix = readFileSync(prefixPath, 'utf-8')
         logger.info({ path: prefixPath, length: contextPrefix.length }, 'Loaded context prefix from file')

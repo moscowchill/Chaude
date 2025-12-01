@@ -1346,8 +1346,8 @@ export class AgentLoop {
     // Collect ALL unique participant names from the conversation
     const participants = new Set<string>()
     for (const msg of messages) {
-      if (msg.author && msg.author !== botName) {
-        participants.add(msg.author)
+      if (msg.author?.username && msg.author.username !== botName) {
+        participants.add(msg.author.username)
       }
     }
 
