@@ -250,8 +250,8 @@ export class ApiServer {
       throw new Error('Invalid Discord message URL format')
     }
 
-    // Determine recency window (default: 500 messages for export API)
-    const recencyWindow = request.recencyWindow || { messages: 500 }
+    // Determine recency window (default: 50 messages)
+    const recencyWindow = request.recencyWindow || { messages: 50 }
     const maxFetch = recencyWindow.messages ? recencyWindow.messages + 100 : 1000
 
     // Use connector.fetchContext() which automatically:

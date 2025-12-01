@@ -554,21 +554,30 @@ export class DiscordConnector {
 
                 logger.debug({ 
                   historicalCount: historicalMessages.length,
-                  batchSoFar: batchResults.length,
-                  remainingInBatch: batchMessages.length - batchMessages.indexOf(msg) - 1,
-                  currentResultsCount: results.length
-                }, 'Fetched historical messages, will collect rest of batch then combine')
+                  currentResultsCount: results.length,
+                }, 'Fetched historical messages, combining with current results')
 
                 // Mark that we found .history (stop after this batch)
                 foundHistory = true
                 
-                // Prepend historical messages to results (they're older)
-                results.unshift(...historicalMessages)
+                // IMPORTANT: Previously collected results (from earlier batches) are NEWER than .history
+                // Save them to append at the end for correct chronological order
+                const newerMessages = [...results]
                 
-                // IMPORTANT: Clear batchResults - we don't want messages BEFORE .history
+                // Reset results with historical messages (oldest)
+                results.length = 0
+                results.push(...historicalMessages)
+                
+                // Store newer messages to append after we collect batch-after-history
+                ;(this as any)._pendingNewerMessages = newerMessages
+                
+                // Clear batchResults - we don't want messages BEFORE .history
                 // Only keep messages AFTER .history in the current channel
                 batchResults.length = 0
-                logger.debug({ clearedBatch: true }, 'Cleared batch before .history, will only keep messages after it')
+                logger.debug({ 
+                  historicalAdded: historicalMessages.length,
+                  newerMessagesSaved: newerMessages.length,
+                }, 'Reset results with historical, saved newer messages for later')
                 
                 // Don't add the .history message itself
                 // Continue collecting remaining messages in batch (after .history)
@@ -589,12 +598,22 @@ export class DiscordConnector {
 
       // After processing all messages in batch
       if (foundHistory) {
-        // This batch has messages AFTER .history - append them (they're newer than historical)
+        // Append messages AFTER .history in current batch
         results.push(...batchResults)
+        
+        // Append previously collected newer messages (batches processed before finding .history)
+        const newerMessages = (this as any)._pendingNewerMessages || []
+        delete (this as any)._pendingNewerMessages
+        
+        if (newerMessages.length > 0) {
+          results.push(...newerMessages)
+        }
+        
         logger.debug({ 
-          batchAdded: batchResults.length, 
-          totalNow: results.length 
-        }, 'Appended batch after .history to results')
+          batchAfterHistory: batchResults.length,
+          newerMessagesAppended: newerMessages.length,
+          totalNow: results.length,
+        }, 'Combined: historical + after-.history + newer batches')
         break  // Stop fetching older batches
       } else {
         // Regular batch - prepend (older messages go before)
