@@ -167,12 +167,10 @@ export class LLMMiddleware {
           const content = currentConversation.map(e => e.text).join('\n')
           messages.push({
             role: 'assistant',
-            // TODO: Re-enable prompt caching later
             // Apply cache_control if we haven't passed the marker yet
-            // content: !passedCacheMarker 
-            //   ? [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }]
-            //   : content,
-            content,
+            content: !passedCacheMarker 
+              ? [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }]
+              : content,
           })
           currentConversation = []
         }
@@ -199,20 +197,18 @@ export class LLMMiddleware {
       }
       
       // Check if this message has the cache marker - switch to uncached mode AFTER this
-      // TODO: Re-enable prompt caching later
       if (hasCacheMarker && !passedCacheMarker) {
-        // Flush everything before this message (cache_control disabled for now)
+        // Flush everything before this message WITH cache_control
         if (currentConversation.length > 0) {
           const content = currentConversation.map(e => e.text).join('\n')
           messages.push({
             role: 'assistant',
-            // content: [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }],
-            content,
+            content: [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }],
           })
           currentConversation = []
         }
         passedCacheMarker = true
-        logger.debug({ messageIndex: i, totalMessages: request.messages.length }, 'Cache marker found (caching disabled)')
+        logger.debug({ messageIndex: i, totalMessages: request.messages.length }, 'Cache marker found - switching to uncached mode')
       }
       
       // Check bot continuation logic
