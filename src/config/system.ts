@@ -174,6 +174,18 @@ export class ConfigSystem {
   }
 
   private applyDefaults(config: Partial<BotConfig>): BotConfig {
+    // Load system prompt from file if specified
+    let systemPrompt = config.system_prompt
+    if (config.system_prompt_file && !systemPrompt) {
+      const promptPath = join(this.configBasePath, 'bots', config.system_prompt_file)
+      if (existsSync(promptPath)) {
+        systemPrompt = readFileSync(promptPath, 'utf-8')
+        logger.info({ path: promptPath, length: systemPrompt.length }, 'Loaded system prompt from file')
+      } else {
+        logger.warn({ path: promptPath }, 'System prompt file not found')
+      }
+    }
+
     return {
       // Identity (required, no defaults)
       name: config.name || '',
@@ -222,7 +234,8 @@ export class ConfigSystem {
       discord_backoff_max: config.discord_backoff_max || 32000,
 
       // Misc
-      system_prompt: config.system_prompt,
+      system_prompt: systemPrompt,
+      system_prompt_file: config.system_prompt_file,
       reply_on_random: config.reply_on_random ?? 500,
       reply_on_name: config.reply_on_name ?? false,
       max_queued_replies: config.max_queued_replies || 1,

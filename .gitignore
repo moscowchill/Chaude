@@ -8,6 +8,7 @@ dist/
 .env
 .env.local
 discord_token
+*_discord_token
 api_token
 
 # Logs
@@ -43,3 +44,6 @@ tools/StrangeSonnet4.5/*
 cache2/*
 config/bots/StrangeBot.yaml
 config/bots/StrangeSonnet4.5.yaml
+config/bots/simantra.yaml
+config/bots/simantra_discord_token
+config/bots/simantra.md

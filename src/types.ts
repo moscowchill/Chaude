@@ -185,6 +185,7 @@ export interface BotConfig {
   
   // Misc
   system_prompt?: string
+  system_prompt_file?: string  // Path to file containing system prompt (relative to config dir)
   reply_on_random: number
   reply_on_name: boolean
   max_queued_replies: number
