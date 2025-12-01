@@ -311,9 +311,16 @@ export class ApiServer {
     // Apply recency window
     messages = this.applyRecencyWindow(messages, recencyWindow)
     
-    if (messages.length < messagesBeforeTruncation) {
+    // Track if recency window actually truncated (before merge which also reduces count)
+    const wasExplicitlyTruncated = !!(request.recencyWindow 
+      && messagesBeforeTruncation > messages.length)
+    
+    if (wasExplicitlyTruncated) {
       logger.debug({ beforeTruncate: messagesBeforeTruncation, afterTruncate: messages.length }, 'Applied recency window')
     }
+
+    // Merge consecutive messages from the same bot
+    messages = this.mergeConsecutiveBotMessages(messages)
 
     // Transform to export format (from DiscordMessage to API format)
     const exportedMessages = messages.map((msg: any) => ({
@@ -342,9 +349,6 @@ export class ApiServer {
       }),
       referencedMessageId: msg.referencedMessage,
     }))
-
-    const wasExplicitlyTruncated = !!(request.recencyWindow 
-      && messagesBeforeTruncation > messages.length)
 
     return {
       messages: exportedMessages,
@@ -461,6 +465,67 @@ export class ApiServer {
     }
 
     return result
+  }
+
+  /**
+   * Merge consecutive messages from the same bot into a single message
+   * This helps with bots that split responses across multiple Discord messages
+   */
+  private mergeConsecutiveBotMessages(messages: any[]): any[] {
+    if (messages.length === 0) return messages
+
+    const merged: any[] = []
+    let current: any = null
+
+    for (const msg of messages) {
+      // Only merge bot messages
+      if (!msg.author?.bot) {
+        if (current) {
+          merged.push(current)
+          current = null
+        }
+        merged.push(msg)
+        continue
+      }
+
+      // Check if this bot message should be merged with the previous
+      if (current && current.author?.id === msg.author?.id) {
+        // Same bot - merge content
+        current.content = current.content + '\n' + msg.content
+        // Track all merged IDs, use the LAST message's ID for the merged result
+        current._mergedIds = current._mergedIds || [current.id]
+        current._mergedIds.push(msg.id)
+        current.id = msg.id  // Use latest message's ID
+        // Merge attachments
+        current.attachments = [...(current.attachments || []), ...(msg.attachments || [])]
+        // Merge reactions (dedupe by emoji)
+        const existingEmojis = new Set((current.reactions || []).map((r: any) => r.emoji))
+        for (const reaction of (msg.reactions || [])) {
+          if (!existingEmojis.has(reaction.emoji)) {
+            current.reactions = current.reactions || []
+            current.reactions.push(reaction)
+          }
+        }
+      } else {
+        // Different bot or first bot message
+        if (current) {
+          merged.push(current)
+        }
+        current = { ...msg }
+      }
+    }
+
+    // Don't forget the last message
+    if (current) {
+      merged.push(current)
+    }
+
+    logger.debug({ 
+      originalCount: messages.length, 
+      mergedCount: merged.length 
+    }, 'Merged consecutive bot messages')
+
+    return merged
   }
 
   private extractChannelIdFromUrl(url: string): string | null {
