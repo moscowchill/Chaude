@@ -121,13 +121,6 @@ export class LLMMiddleware {
     // Everything AFTER (including the section containing it) does NOT
     let passedCacheMarker = false
     
-    logger.debug({ 
-      hasSystemPrompt: !!request.system_prompt,
-      systemPromptLength: request.system_prompt?.length,
-      hasContextPrefix: !!request.context_prefix,
-      contextPrefixLength: request.context_prefix?.length
-    }, 'transformToPrefill start')
-    
     // Add system prompt if present (with cache_control for prompt caching)
     if (request.system_prompt) {
       messages.push({
@@ -169,15 +162,12 @@ export class LLMMiddleware {
       
       // If message has images, flush current conversation and add as user message
       if (hasImages && !isEmpty) {
-        // Flush current assistant conversation
+        // Flush current assistant conversation (NO cache_control here - only at cache marker)
         if (currentConversation.length > 0) {
           const content = currentConversation.map(e => e.text).join('\n')
           messages.push({
             role: 'assistant',
-            // Apply cache_control if we haven't passed the marker yet
-            content: !passedCacheMarker 
-              ? [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }]
-              : content,
+            content: content,
           })
           currentConversation = []
         }
