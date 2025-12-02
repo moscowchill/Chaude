@@ -25,11 +25,27 @@ export class AnthropicProvider implements LLMProvider {
     const callId = trace?.startLLMCall(trace.getLLMCallCount())
     const startTime = Date.now()
 
-      // Extract system messages and convert to top-level parameter
-      const systemMessages = request.messages
-        .filter((m) => m.role === 'system')
-        .map((m) => (typeof m.content === 'string' ? m.content : ''))
-        .join('\n\n')
+      // Extract system messages - preserve cache_control if present
+      const systemMsgs = request.messages.filter((m) => m.role === 'system')
+      let systemParam: string | any[] | undefined
+      
+      if (systemMsgs.length > 0) {
+        // Check if any system message has cache_control (array format)
+        const hasArrayContent = systemMsgs.some(m => Array.isArray(m.content))
+        
+        if (hasArrayContent) {
+          // Use array format to preserve cache_control
+          systemParam = systemMsgs.flatMap(m => {
+            if (Array.isArray(m.content)) return m.content
+            return [{ type: 'text', text: m.content }]
+          })
+        } else {
+          // Simple string format
+          systemParam = systemMsgs
+            .map(m => typeof m.content === 'string' ? m.content : '')
+            .join('\n\n')
+        }
+      }
 
       const nonSystemMessages = request.messages.filter((m) => m.role !== 'system')
 
@@ -37,7 +53,7 @@ export class AnthropicProvider implements LLMProvider {
       const params: any = {
         model: request.model,
         max_tokens: request.max_tokens,
-        system: systemMessages || undefined,
+        system: systemParam,
         messages: nonSystemMessages,
         stop_sequences: request.stop_sequences,
       }
