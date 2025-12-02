@@ -116,7 +116,7 @@ export class AnthropicProvider implements LLMProvider {
           callId,
           {
             messageCount: request.messages.length,
-            systemPromptLength: systemMessages.length,
+            systemPromptLength: Array.isArray(systemParam) ? systemParam.length : (systemParam?.length || 0),
             hasTools: !!(request.tools && request.tools.length > 0),
             toolCount: request.tools?.length || 0,
             temperature: request.temperature,
@@ -167,7 +167,7 @@ export class AnthropicProvider implements LLMProvider {
           model: request.model,
           request: {
             messageCount: request.messages.length,
-            systemPromptLength: systemMessages?.length || 0,
+            systemPromptLength: Array.isArray(systemParam) ? systemParam.length : (systemParam?.length || 0),
             hasTools: !!(request.tools && request.tools.length > 0),
             toolCount: request.tools?.length || 0,
             temperature: request.temperature,
