@@ -686,6 +686,21 @@ const HTML = `<!DOCTYPE html>
       font-weight: 600;
     }
     
+    .cache-badge {
+      background: #10b981;
+      color: white;
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border-radius: 3px;
+      margin-left: 8px;
+      font-weight: 600;
+    }
+    
+    .cache-marker-msg {
+      border-left: 3px solid #10b981 !important;
+      background: rgba(16, 185, 129, 0.1) !important;
+    }
+    
     .log-entry {
       font-family: monospace;
       font-size: 0.8rem;
@@ -1228,16 +1243,16 @@ const HTML = `<!DOCTYPE html>
           <div class="section-content">
             <div class="message-list">
               \${(cb?.messages || []).map((m, i) => \`
-                <div class="message-item" onclick="toggleMessage(this)">
+                <div class="message-item \${m.hasCacheControl ? 'cache-marker-msg' : ''}" onclick="toggleMessage(this)">
                   <span style="color: var(--text-muted); margin-right: 8px;">#\${m.position}</span>
                   <span class="message-author">\${m.participant}</span>
                   <span class="message-content">\${truncate(m.contentPreview, 60)}</span>
                   \${m.isTrigger ? '<span class="trigger-badge">TRIGGER</span>' : ''}
+                  \${m.hasCacheControl ? '<span class="cache-badge">📍 CACHE</span>' : ''}
                   <span style="color: var(--text-muted); margin-left: 8px;">~\${formatTokens(m.tokenEstimate)} tk</span>
                   <div class="message-meta">
                     Discord ID: \${m.discordMessageId || 'N/A'}
                     \${m.hasImages ? ' | ' + m.imageCount + ' image(s)' : ''}
-                    \${m.hasCacheControl ? ' | CACHE MARKER' : ''}
                     \${m.transformations?.length ? ' | ' + m.transformations.join(', ') : ''}
                   </div>
                   <div class="message-expanded">\${escapeHtml(m.contentPreview)}</div>
