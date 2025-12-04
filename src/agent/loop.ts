@@ -121,8 +121,8 @@ export class AgentLoop {
 
     const { channelId, guildId } = firstEvent
 
-    // Get triggering message ID for tool tracking
-    const triggeringEvent = events.find((e) => e.type === 'message') as any
+    // Get triggering message ID for tool tracking (prefer non-system messages)
+    const triggeringEvent = this.findTriggeringMessageEvent(events)
     const triggeringMessageId = triggeringEvent?.data?.id
 
     // Check for m command and delete it
@@ -286,6 +286,15 @@ export class AgentLoop {
     return 'mention'
   }
 
+  private findTriggeringMessageEvent(events: Event[]): (Event & { data: any }) | undefined {
+    return events.find((event) => event.type === 'message' && !this.isSystemDiscordMessage(event.data))
+      || events.find((event) => event.type === 'message')
+  }
+
+  private isSystemDiscordMessage(message: any): boolean {
+    return Boolean(message?.system)
+  }
+
   /**
    * Strip thinking blocks from text, respecting backtick escaping
    * e.g., "<thinking>foo</thinking>" -> ""
@@ -378,6 +387,11 @@ export class AgentLoop {
       }
 
       const message = event.data as any
+
+      // Skip Discord system messages (e.g., thread starter notifications)
+      if (this.isSystemDiscordMessage(message)) {
+        continue
+      }
 
       // Skip bot's own messages
       if (message.author?.id === this.botUserId) {
