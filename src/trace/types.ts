@@ -48,6 +48,9 @@ export interface ActivationTrace {
   
   /** Total duration in milliseconds */
   durationMs?: number
+  
+  /** Full bot configuration used for this activation */
+  config?: Record<string, any>
 }
 
 // ============================================================================

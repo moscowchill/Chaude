@@ -3,7 +3,7 @@
  */
 
 import { ContentBlock } from '../../types.js'
-import { StateScope } from './state.js'
+import type { StateScope } from './state.js'
 
 export interface ToolPlugin {
   name: string

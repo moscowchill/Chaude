@@ -80,6 +80,7 @@ export class TraceCollector {
   
   private guildId?: string
   private botUserId?: string
+  private config?: Record<string, any>
   
   private activation?: ActivationInfo
   private rawDiscordMessages?: RawDiscordMessage[]
@@ -114,6 +115,13 @@ export class TraceCollector {
   
   setBotUserId(userId: string): void {
     this.botUserId = userId
+  }
+  
+  setConfig(config: Record<string, any>): void {
+    // Clone config to avoid mutations and remove sensitive data
+    this.config = { ...config }
+    // Don't store tokens or other sensitive fields
+    delete this.config.discord_token
   }
   
   // ──────────────────────────────────────────────────────────────────────────
@@ -370,6 +378,7 @@ export class TraceCollector {
       outcome: this.outcome,
       logs: this.logs,
       durationMs: Date.now() - this.startTime.getTime(),
+      config: this.config,
     }
   }
   
@@ -444,5 +453,12 @@ export function traceLog(
  */
 export function traceRawDiscordMessages(messages: RawDiscordMessage[]): void {
   getCurrentTrace()?.recordRawDiscordMessages(messages)
+}
+
+/**
+ * Set bot config in current trace
+ */
+export function traceSetConfig(config: Record<string, any>): void {
+  getCurrentTrace()?.setConfig(config)
 }
 

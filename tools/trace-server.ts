@@ -1218,6 +1218,54 @@ const HTML = `<!DOCTYPE html>
         </div>
         \` : ''}
         
+        \${t.config ? \`
+        <div class="section">
+          <div class="section-header" onclick="toggleSection(this)">
+            <h3>⚙️ Bot Configuration</h3>
+            <span class="section-toggle">▶</span>
+          </div>
+          <div class="section-content">
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Model</div>
+                <div style="font-weight: 500;">\${t.config.model || 'N/A'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Mode</div>
+                <div style="font-weight: 500;">\${t.config.mode || 'N/A'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Temperature</div>
+                <div style="font-weight: 500;">\${t.config.temperature ?? 'default'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Tools Enabled</div>
+                <div style="font-weight: 500;">\${t.config.tools_enabled ? '✓ Yes' : '✗ No'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Inline Tool Execution</div>
+                <div style="font-weight: 500;">\${t.config.inline_tool_execution ? '✓ Yes' : '✗ No'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Preserve Thinking</div>
+                <div style="font-weight: 500;">\${t.config.preserve_thinking_context ? '✓ Yes' : '✗ No'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Plugins</div>
+                <div style="font-weight: 500;">\${(t.config.tool_plugins || []).join(', ') || 'None'}</div>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 4px;">Rolling Threshold</div>
+                <div style="font-weight: 500;">\${t.config.rolling_threshold || 'N/A'}</div>
+              </div>
+            </div>
+            <div style="margin-top: 16px;">
+              <button onclick="viewFullConfig()" class="view-json-btn">View Full Config JSON</button>
+            </div>
+          </div>
+        </div>
+        \` : ''}
+        
         <div class="section">
           <div class="section-header" onclick="toggleSection(this)">
             <h3>Raw Discord Messages (\${t.rawDiscordMessages?.length || 0})</h3>
@@ -1412,6 +1460,11 @@ const HTML = `<!DOCTYPE html>
       const res = await apiFetch('/api/response/' + ref);
       const data = await res.json();
       showJsonModal('LLM Response', data);
+    }
+    
+    function viewFullConfig() {
+      if (!currentTrace?.config) { alert('No config stored for this trace'); return; }
+      showJsonModal('Bot Configuration', currentTrace.config);
     }
     
     function showJsonModal(title, data) {

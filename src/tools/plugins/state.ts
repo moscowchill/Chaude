@@ -11,7 +11,7 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import { logger } from '../../utils/logger.js'
 
-export type StateScope = 'global' | 'channel' | 'epic'
+export type StateScope = 'global' | 'channel' | 'epic' | 'off'
 
 export interface StateEvent {
   messageId: string

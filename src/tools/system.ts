@@ -149,10 +149,20 @@ export class ToolSystem {
 
 
   /**
-   * Get available tools
+   * Get available tools (filtered to exclude disabled plugins)
    */
   getAvailableTools(): ToolDefinition[] {
-    return this.tools
+    return this.tools.filter(tool => {
+      // Check if this is a plugin tool that is disabled
+      if (tool.serverName?.startsWith('plugin:')) {
+        const pluginName = tool.serverName.replace('plugin:', '')
+        const pluginConfig = this.pluginConfigs[pluginName]
+        if (pluginConfig?.state_scope === 'off') {
+          return false  // Filter out disabled plugin tools
+        }
+      }
+      return true
+    })
   }
 
   /**
@@ -474,6 +484,22 @@ export class ToolSystem {
     // Check if this is a plugin tool
     const pluginHandler = this.pluginHandlers.get(call.name)
     if (pluginHandler) {
+      // Check if the plugin is disabled (state_scope: 'off')
+      const toolDef = this.tools.find(t => t.name === call.name)
+      if (toolDef?.serverName?.startsWith('plugin:')) {
+        const pluginName = toolDef.serverName.replace('plugin:', '')
+        const pluginConfig = this.pluginConfigs[pluginName]
+        if (pluginConfig?.state_scope === 'off') {
+          logger.debug({ call, pluginName }, 'Plugin tool disabled (state_scope: off)')
+          return {
+            callId: call.id,
+            output: `Plugin "${pluginName}" is disabled`,
+            timestamp: new Date(),
+            error: 'Plugin disabled',
+          }
+        }
+      }
+      
       try {
         logger.debug({ call, type: 'plugin' }, 'Executing plugin tool')
         

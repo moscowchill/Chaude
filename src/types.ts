@@ -232,8 +232,8 @@ export interface MCPServerConfig {
 }
 
 export interface PluginInstanceConfig {
-  /** State scope: 'global', 'channel', or 'epic' */
-  state_scope?: 'global' | 'channel' | 'epic'
+  /** State scope: 'global', 'channel', 'epic', or 'off' to disable the plugin */
+  state_scope?: 'global' | 'channel' | 'epic' | 'off'
   /** Any other plugin-specific settings */
   [key: string]: any
 }

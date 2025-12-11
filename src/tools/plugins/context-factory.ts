@@ -59,7 +59,7 @@ export class PluginContextFactory {
       historyOriginChannelId?: string
     },
     epicReducer?: (state: any, delta: any) => any,
-    pluginConfig?: { state_scope?: 'global' | 'channel' | 'epic'; [key: string]: any }
+    pluginConfig?: { state_scope?: 'global' | 'channel' | 'epic' | 'off'; [key: string]: any }
   ): PluginStateContext {
     const stateManager = this.getStateManager(pluginId)
     const { channelId, currentMessageId } = baseContext

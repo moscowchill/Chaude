@@ -19,6 +19,7 @@ import {
   getTraceWriter,
   traceToolExecution,
   traceRawDiscordMessages,
+  traceSetConfig,
   RawDiscordMessage,
 } from '../trace/index.js'
 import { ActivationStore, Activation, TriggerType } from '../activation/index.js'
@@ -670,6 +671,9 @@ export class AgentLoop {
         channelConfigs: inheritedPinnedConfigs,
       })
       endProfile('configLoad')
+      
+      // Record config in trace (for debugging)
+      traceSetConfig(config)
 
       // Initialize MCP servers from config (once per bot)
       if (!this.mcpInitialized && config.mcp_servers && config.mcp_servers.length > 0) {
@@ -809,6 +813,12 @@ export class AgentLoop {
             try {
               // Get plugin-specific config
               const pluginInstanceConfig = config.plugin_config?.[pluginName]
+              
+              // Skip disabled plugins (state_scope: 'off')
+              if (pluginInstanceConfig?.state_scope === 'off') {
+                logger.debug({ pluginName }, 'Skipping disabled plugin (state_scope: off)')
+                continue
+              }
               
               const stateContext = pluginContextFactory.createStateContext(
                 pluginName,
