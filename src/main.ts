@@ -15,6 +15,7 @@ import { LLMMiddleware } from './llm/middleware.js'
 import { AnthropicProvider } from './llm/providers/anthropic.js'
 import { OpenAIProvider } from './llm/providers/openai.js'
 import { OpenAICompletionsProvider } from './llm/providers/openai-completions.js'
+import { OpenRouterProvider } from './llm/providers/openrouter.js'
 import { ToolSystem } from './tools/system.js'
 import { ApiServer } from './api/server.js'
 import { logger } from './utils/logger.js'
@@ -130,6 +131,18 @@ async function main() {
         // Register with vendor name so middleware can route correctly
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName, baseUrl }, 'Registered OpenAI Completions provider (base model)')
+      }
+      
+      // OpenRouter provider (supports prefill for compatible models like Claude)
+      if (config?.openrouter_api_key) {
+        const baseUrl = config.openrouter_base_url || 'https://openrouter.ai/api/v1'
+        const provider = new OpenRouterProvider({
+          apiKey: config.openrouter_api_key,
+          baseUrl,
+        })
+        // Register with vendor name so middleware can route correctly
+        llmMiddleware.registerProvider(provider, vendorName)
+        logger.info({ vendorName, baseUrl }, 'Registered OpenRouter provider')
       }
     }
 
