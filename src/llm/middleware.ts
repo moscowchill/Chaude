@@ -118,6 +118,9 @@ export class LLMMiddleware {
     const joiner = delimiter ? '' : '\n'
     let lastNonEmptyParticipant: string | null = null
     
+    // Check if prompt caching is enabled (default: true)
+    const promptCachingEnabled = request.config.prompt_caching !== false
+    
     // Track conversation lines for current section
     let currentConversation: Array<{ text: string }> = []
     
@@ -126,15 +129,18 @@ export class LLMMiddleware {
     // Everything AFTER (including the section containing it) does NOT
     let passedCacheMarker = false
     
-    // Add system prompt if present (with cache_control for prompt caching)
+    // Add system prompt if present (with cache_control for prompt caching if enabled)
     if (request.system_prompt) {
+      const systemContent: any = { 
+        type: 'text', 
+        text: request.system_prompt,
+      }
+      if (promptCachingEnabled) {
+        systemContent.cache_control = { type: 'ephemeral' }
+      }
       messages.push({
         role: 'system',
-        content: [{ 
-          type: 'text', 
-          text: request.system_prompt,
-          cache_control: { type: 'ephemeral' }
-        }],
+        content: [systemContent],
       })
     }
     
@@ -145,13 +151,16 @@ export class LLMMiddleware {
         role: 'user',
         content: '[conversation begins]',
       })
+      const prefixContent: any = { 
+        type: 'text', 
+        text: request.context_prefix,
+      }
+      if (promptCachingEnabled) {
+        prefixContent.cache_control = { type: 'ephemeral' }
+      }
       messages.push({
         role: 'assistant',
-        content: [{ 
-          type: 'text', 
-          text: request.context_prefix,
-          cache_control: { type: 'ephemeral' }
-        }],
+        content: [prefixContent],
       })
     }
     
@@ -200,12 +209,16 @@ export class LLMMiddleware {
       
       // Check if this message has the cache marker - switch to uncached mode AFTER this
       if (hasCacheMarker && !passedCacheMarker) {
-        // Flush everything before this message WITH cache_control
+        // Flush everything before this message WITH cache_control (if caching enabled)
         if (currentConversation.length > 0) {
           const content = currentConversation.map(e => e.text).join(joiner)
+          const contentBlock: any = { type: 'text', text: content }
+          if (promptCachingEnabled) {
+            contentBlock.cache_control = { type: 'ephemeral' }
+          }
           messages.push({
             role: 'assistant',
-            content: [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }],
+            content: [contentBlock],
           })
           currentConversation = []
         }

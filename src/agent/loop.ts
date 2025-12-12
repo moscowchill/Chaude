@@ -607,51 +607,57 @@ export class AgentLoop {
         configSource: 'pinned + bot yaml'
       }, 'Calculated fetch depth from config')
       
+      const promptCachingEnabled = preConfig.prompt_caching !== false
+      
       startProfile('fetchContext')
       // 3. Fetch context with calculated depth (messages + images), reusing pinned configs
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
-        // Anchor the start of the fetched window for prompt cache stability.
+        // Anchor the start of the fetched window for prompt cache stability (if enabled).
         // This prevents the oldest message from sliding forward as new messages arrive,
         // which would otherwise invalidate the cached prompt prefix on every activation.
-        firstMessageId: state.cacheOldestMessageId || undefined,
+        firstMessageId: promptCachingEnabled ? (state.cacheOldestMessageId || undefined) : undefined,
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
       })
       endProfile('fetchContext')
 
       // Cache stability: maintain a consistent starting point for prompt caching
-      // But allow expansion when .history brings in older context
-      const cacheOldestId = state.cacheOldestMessageId
-      const fetchedOldestId = discordContext.messages[0]?.id
-      
-      if (!cacheOldestId && fetchedOldestId) {
-        // First activation - set cache marker to oldest fetched message
-        this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-        logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
-      } else if (cacheOldestId && fetchedOldestId) {
-        const cacheIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
+      // Skip if prompt caching is disabled
+      if (promptCachingEnabled) {
+        const cacheOldestId = state.cacheOldestMessageId
+        const fetchedOldestId = discordContext.messages[0]?.id
         
-        if (cacheIdx > 0) {
-          // Cache marker is NEWER than fetched oldest - .history brought in older context
-          // Update cache marker to include the older context instead of trimming it away
-          logger.debug({
-            oldCacheMarker: cacheOldestId,
-            newCacheMarker: fetchedOldestId,
-            olderMessagesIncluded: cacheIdx,
-          }, 'Expanding cache marker to include .history context')
+        if (!cacheOldestId && fetchedOldestId) {
+          // First activation - set cache marker to oldest fetched message
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-          // No trimming needed - keep all fetched messages
-        } else if (cacheIdx === -1) {
-          // Cached oldest message no longer in fetch - cache stability is broken
-          logger.warn({
-            cacheOldestId,
-            fetchedMessages: discordContext.messages.length,
-          }, 'Cached oldest message not found in fetch - resetting cached starting point')
-          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+          logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
+        } else if (cacheOldestId && fetchedOldestId) {
+          const cacheIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
+          
+          if (cacheIdx > 0) {
+            // Cache marker is NEWER than fetched oldest - .history brought in older context
+            // Update cache marker to include the older context instead of trimming it away
+            logger.debug({
+              oldCacheMarker: cacheOldestId,
+              newCacheMarker: fetchedOldestId,
+              olderMessagesIncluded: cacheIdx,
+            }, 'Expanding cache marker to include .history context')
+            this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+            // No trimming needed - keep all fetched messages
+          } else if (cacheIdx === -1) {
+            // Cached oldest message no longer in fetch - cache stability is broken
+            logger.warn({
+              cacheOldestId,
+              fetchedMessages: discordContext.messages.length,
+            }, 'Cached oldest message not found in fetch - resetting cached starting point')
+            this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+          }
+          // If cacheIdx === 0, the cache marker is at the start - perfect, no action needed
         }
-        // If cacheIdx === 0, the cache marker is at the start - perfect, no action needed
+      } else {
+        logger.debug({ channelId }, 'Prompt caching disabled - skipping cache marker logic')
       }
       
       // Record raw Discord messages to trace (before any transformation)
@@ -1083,20 +1089,25 @@ export class AgentLoop {
       const prevCacheMarker = state.lastCacheMarker
       const prevMessagesSinceRoll = state.messagesSinceRoll
 
-      // Update cache marker if it changed
-      if (contextResult.cacheMarker && contextResult.cacheMarker !== prevCacheMarker) {
-        this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
+      // Update cache markers only if prompt caching is enabled
+      if (config.prompt_caching !== false) {
+        // Update cache marker if it changed
+        if (contextResult.cacheMarker && contextResult.cacheMarker !== prevCacheMarker) {
+          this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
+        }
+
+        // Record oldest message ID when rolling for cache stability
+        if (contextResult.didRoll) {
+          const oldestMessageId =
+            contextResult.request.messages.find((m) => m.messageId)?.messageId ?? null
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, oldestMessageId)
+          logger.debug({ channelId, oldestMessageId }, 'Context rolled, recorded oldest message for cache stability')
+        }
       }
 
       // Update message count - increment if we didn't roll, reset if we did
       if (contextResult.didRoll) {
         this.stateManager.resetMessageCount(this.botId, channelId)
-        // Record the oldest message ID for cache stability on subsequent requests
-        // Use the oldest Discord message ID that actually made it into the rolled context
-        const oldestMessageId =
-          contextResult.request.messages.find((m) => m.messageId)?.messageId ?? null
-        this.stateManager.updateCacheOldestMessageId(this.botId, channelId, oldestMessageId)
-        logger.debug({ channelId, oldestMessageId }, 'Context rolled, recorded oldest message for cache stability')
       } else {
         this.stateManager.incrementMessageCount(this.botId, channelId)
       }

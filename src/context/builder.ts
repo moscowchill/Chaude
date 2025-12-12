@@ -1381,6 +1381,7 @@ export class ContextBuilder {
       messageDelimiter: config.message_delimiter,  // For base model completions
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
+      prompt_caching: config.prompt_caching,
     }
   }
 }

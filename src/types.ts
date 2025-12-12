@@ -135,6 +135,7 @@ export interface ModelConfig {
   messageDelimiter?: string  // Optional delimiter appended to each message (for base model completions)
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
+  prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
 }
 
 /**
@@ -164,6 +165,7 @@ export interface BotConfig {
   rolling_threshold: number  // Messages before truncation
   recent_participant_count: number  // Number of recent participants for stop sequences
   authorized_roles: string[]  // Roles authorized to use .history commands
+  prompt_caching?: boolean  // Enable Anthropic prompt caching (default: true)
   
   // Image config
   include_images: boolean
