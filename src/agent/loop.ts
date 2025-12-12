@@ -976,15 +976,15 @@ export class AgentLoop {
           responseText = strippedResponse.trim()
         }
 
-        // Strip <reply:@username> prefix if bot included it (bot responses are already Discord replies)
-        const replyPattern = /^\s*<reply:@[^>]+>\s*/
-        if (replyPattern.test(responseText)) {
-          responseText = responseText.replace(replyPattern, '')
-          logger.debug('Stripped reply prefix from bot response')
-        }
+      // Strip <reply:@username> prefix if bot included it (bot responses are already Discord replies)
+      const replyPattern = /^\s*<reply:@[^>]+>\s*/
+      if (replyPattern.test(responseText)) {
+        responseText = responseText.replace(replyPattern, '')
+        logger.debug('Stripped reply prefix from bot response')
+      }
 
-        // Replace <@username> with <@USER_ID> for Discord mentions
-        responseText = await this.replaceMentions(responseText, discordContext.messages)
+      // Replace <@username> with <@USER_ID> for Discord mentions
+      responseText = await this.replaceMentions(responseText, discordContext.messages)
       }
 
       let sentMessageIds: string[] = []
@@ -1066,9 +1066,9 @@ export class AgentLoop {
 
       // Update cache markers only if prompt caching is enabled
       if (config.prompt_caching !== false) {
-        // Update cache marker if it changed
+      // Update cache marker if it changed
         if (contextResult.cacheMarker && contextResult.cacheMarker !== prevCacheMarker) {
-          this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
+        this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
         }
 
         // ALWAYS update cacheOldestMessageId to match the first message in the actual request
@@ -1335,8 +1335,43 @@ export class AgentLoop {
       // PROGRESSIVE DISPLAY: Send the visible text before tool calls to Discord
       // Strip both tool XML and thinking blocks to get display text
       const strippedToolXml = this.toolSystem.stripToolXml(toolParse.beforeText)
-      const visibleBeforeText = this.stripThinkingBlocks(strippedToolXml).stripped.trim()
+      let visibleBeforeText = this.stripThinkingBlocks(strippedToolXml).stripped.trim()
       let sentMsgIdsThisRound: string[] = []
+      
+      // Check for hallucinated participant at start of message (before sending anything)
+      if (visibleBeforeText && discordMessages && toolDepth === 0) {
+        const truncResult = this.truncateAtParticipant(
+          visibleBeforeText, 
+          discordMessages, 
+          config.innerName, 
+          llmRequest.stop_sequences
+        )
+        if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
+          // Response started with another participant - complete hallucination
+          // Abort and return empty response
+          logger.warn({ truncatedAt: truncResult.truncatedAt }, 'Aborting inline execution - response started with hallucinated participant')
+          return this.finalizeInlineExecution({
+            accumulatedOutput: '',  // Discard everything
+            pendingToolPersistence,
+            allToolCallIds,
+            allPreambleMessageIds,
+            allSentMessageIds,
+            messageContexts,
+            lastContextEndPos,
+            channelId,
+            triggeringMessageId,
+            config,
+            llmRequest,
+            discordMessages,
+            stopReason: 'hallucination',
+          })
+        }
+        // Apply any mid-text truncation
+        if (truncResult.truncatedAt) {
+          logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated pre-tool text at participant')
+          visibleBeforeText = truncResult.text.trim()
+        }
+      }
       
       if (visibleBeforeText) {
         // Send the pre-tool visible text as a message
