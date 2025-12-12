@@ -252,70 +252,17 @@ export class DiscordConnector {
       
       // Extend fetch to include firstMessageId (cache marker) if provided
       // This ensures cache stability - we fetch back far enough to include the cached portion
+      // Note: Cache marker handling has been moved to AgentLoop
+      // The connector now returns all fetched messages without trimming
+      // This allows .history commands to expand context beyond the cache marker
       if (firstMessageId) {
+        const firstIndex = messages.findIndex(m => m.id === firstMessageId)
         logger.debug({
           currentMessageCount: messages.length,
-          lookingFor: firstMessageId
-        }, 'Checking if cache marker is in fetch window')
-        
-        let firstIndex = messages.findIndex(m => m.id === firstMessageId)
-        
-        // If not found, extend fetch backwards until we find it (or hit limit)
-        const oldestMessage = messages[0]
-        if (firstIndex < 0 && oldestMessage) {
-          const maxExtend = 500  // Maximum additional messages to fetch for cache stability
-          let extended = 0
-          let currentBefore = oldestMessage.id  // Oldest message in current window
-          
-          logger.debug({ 
-            currentBefore, 
-            maxExtend,
-            firstMessageId 
-          }, 'Cache marker not in window, extending fetch backwards')
-          
-          while (extended < maxExtend) {
-            const batch = await channel.messages.fetch({ limit: 100, before: currentBefore })
-            if (batch.size === 0) break
-            
-            const batchMessages = Array.from(batch.values()).sort((a, b) => a.id.localeCompare(b.id))
-            messages = [...batchMessages, ...messages]
-            extended += batchMessages.length
-            
-            // Check if we found the cache marker
-            firstIndex = messages.findIndex(m => m.id === firstMessageId)
-            if (firstIndex >= 0) {
-              logger.debug({ 
-                extended, 
-                firstIndex,
-                totalMessages: messages.length 
-              }, 'Found cache marker after extending fetch')
-              break
-            }
-            
-            const oldestBatch = batchMessages[0]
-            if (!oldestBatch) break
-            currentBefore = oldestBatch.id
-          }
-          
-          if (firstIndex < 0) {
-            logger.warn({ 
-              firstMessageId, 
-              extended,
-              totalMessages: messages.length,
-              oldestId: messages[0]?.id
-            }, 'Cache marker not found even after extending fetch - may have been deleted')
-          }
-        }
-        
-        // Trim to cache marker (keep messages from marker onwards)
-        if (firstIndex >= 0) {
-          messages = messages.slice(firstIndex)
-          logger.debug({ 
-            trimmedFrom: firstIndex, 
-            remaining: messages.length,
-            firstMessageId
-          }, 'Trimmed to cache marker')
-        }
+          cacheMarkerFound: firstIndex >= 0,
+          cacheMarkerIndex: firstIndex,
+          firstMessageId
+        }, 'Cache marker check (no trimming - handled by AgentLoop)')
       }
       
       logger.debug({ finalMessageCount: messages.length }, 'Recursive fetch complete with .history processing')

@@ -621,37 +621,37 @@ export class AgentLoop {
       })
       endProfile('fetchContext')
 
-      // If we don't yet have a cached starting point for this channel, initialize it now.
-      // The Discord connector will ensure this ID remains in the fetch window on subsequent activations.
-      if (!state.cacheOldestMessageId && discordContext.messages[0]?.id) {
-        const oldestMessageId = discordContext.messages[0].id
-        this.stateManager.updateCacheOldestMessageId(this.botId, channelId, oldestMessageId)
-        logger.debug({ channelId, oldestMessageId }, 'Initialized cached starting point for cache stability')
-      }
-      
-      // Trim messages to cached starting point for cache stability
-      // This ensures the cached prefix stays identical between requests
+      // Cache stability: maintain a consistent starting point for prompt caching
+      // But allow expansion when .history brings in older context
       const cacheOldestId = state.cacheOldestMessageId
-      if (cacheOldestId) {
-        const oldestIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
-        if (oldestIdx > 0) {
-          // Trim messages that are older than our cached starting point
-          const beforeTrim = discordContext.messages.length
-          discordContext.messages = discordContext.messages.slice(oldestIdx)
+      const fetchedOldestId = discordContext.messages[0]?.id
+      
+      if (!cacheOldestId && fetchedOldestId) {
+        // First activation - set cache marker to oldest fetched message
+        this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+        logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
+      } else if (cacheOldestId && fetchedOldestId) {
+        const cacheIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
+        
+        if (cacheIdx > 0) {
+          // Cache marker is NEWER than fetched oldest - .history brought in older context
+          // Update cache marker to include the older context instead of trimming it away
           logger.debug({
-            cacheOldestId,
-            trimmed: beforeTrim - discordContext.messages.length,
-            remaining: discordContext.messages.length,
-          }, 'Trimmed messages to cached starting point for cache stability')
-        } else if (oldestIdx === -1) {
+            oldCacheMarker: cacheOldestId,
+            newCacheMarker: fetchedOldestId,
+            olderMessagesIncluded: cacheIdx,
+          }, 'Expanding cache marker to include .history context')
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+          // No trimming needed - keep all fetched messages
+        } else if (cacheIdx === -1) {
           // Cached oldest message no longer in fetch - cache stability is broken
           logger.warn({
             cacheOldestId,
             fetchedMessages: discordContext.messages.length,
           }, 'Cached oldest message not found in fetch - resetting cached starting point')
-          const newOldestMessageId = discordContext.messages[0]?.id ?? null
-          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, newOldestMessageId)
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
         }
+        // If cacheIdx === 0, the cache marker is at the start - perfect, no action needed
       }
       
       // Record raw Discord messages to trace (before any transformation)
