@@ -229,7 +229,21 @@ export class LLMMiddleware {
       // Check bot continuation logic
       const isBotMessage = msg.participant === botName
       const hasToolResult = msg.content.some(c => c.type === 'tool_result')
-      const isContinuation = isBotMessage && lastNonEmptyParticipant === botName && !hasToolResult
+      
+      // Continuation mode: if the last message in the context is from the bot,
+      // we should NOT add a new "\nBotName:" suffix. This is required for "m continue"
+      // where we want to continue the previous bot message mid-sentence.
+      //
+      // Historically this used lastNonEmptyParticipant, but that can be thrown off by
+      // empty/filtered messages. Using the immediately previous message is more robust.
+      const prevMsg = i > 0 ? request.messages[i - 1] : undefined
+      const prevIsBotMessage = !!prevMsg && prevMsg.participant === botName
+      const prevHasToolResult = !!prevMsg && prevMsg.content.some(c => c.type === 'tool_result')
+      const isContinuation =
+        isBotMessage && !hasToolResult && (
+          lastNonEmptyParticipant === botName ||
+          (prevIsBotMessage && !prevHasToolResult)
+        )
       
       if (isContinuation && isLastMessage) {
         // Bot continuation - don't add prefix, just complete from where we are

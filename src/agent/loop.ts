@@ -694,8 +694,11 @@ export class AgentLoop {
       // Filter out "m " command messages from context (they should be deleted but might still be fetched)
       const originalCount = discordContext.messages.length
       discordContext.messages = discordContext.messages.filter(msg => {
-        const content = msg.content?.trim()
-        return !content?.startsWith('m ')
+        // Replies are encoded as "<reply:@user> ..." in fetched context.
+        // Strip that prefix before checking for m-commands so reply-based
+        // commands like "<reply:@Bot> m continue" don't leak into the LLM context.
+        const contentWithoutReply = msg.content?.trim().replace(/^<reply:@[^>]+>\s*/, '') || ''
+        return !/^m\s+/i.test(contentWithoutReply)
       })
       
       if (discordContext.messages.length < originalCount) {
