@@ -83,16 +83,28 @@ export class ContextBuilder {
     const beforeFilter = messages.length
     messages = this.filterDotMessages(messages)
     const filteredCount = beforeFilter - messages.length
+    
+    // Debug: log last few message IDs after filtering
+    logger.debug({
+      lastMessageIds: messages.slice(-5).map(m => m.id),
+      totalAfterFilter: messages.length,
+    }, 'Messages after dot filtering')
 
     // 3. Convert to participant messages (limits applied later on final context)
     // Pass botDiscordUsername so we can normalize bot's own messages to use config.name
-    const participantMessages = await this.formatMessages(
+    let participantMessages = await this.formatMessages(
       messages,
       discordContext.images,
       discordContext.documents,
       config,
       botDiscordUsername
     )
+    
+    // Debug: log last few participant message IDs
+    logger.debug({
+      lastParticipantIds: participantMessages.slice(-5).map(m => m.messageId),
+      totalParticipants: participantMessages.length,
+    }, 'Participant messages after formatMessages')
 
     // 5. Interleave historical tool use from cache (limited to last 5 calls with results)
     // Skip when preserve_thinking_context is enabled - activation store injection handles tool content
@@ -152,6 +164,11 @@ export class ContextBuilder {
     if (pluginInjections && pluginInjections.length > 0) {
       this.insertPluginInjections(participantMessages, pluginInjections, messages)
     }
+
+    // 4.7. Merge consecutive messages from the same participant
+    // This handles "m continue" scenarios where bot has multiple sequential messages
+    // Done AFTER injection so that message IDs are available for activation lookup
+    participantMessages = this.mergeConsecutiveParticipantMessages(participantMessages)
 
     // 5. Apply limits on final assembled context (after images & tools added)
     const { messages: finalMessages, didTruncate, messagesRemoved } = this.applyLimits(
@@ -410,6 +427,50 @@ export class ContextBuilder {
         lastMsg.attachments.push(...msg.attachments)
       } else {
         merged.push({ ...msg })
+      }
+    }
+
+    return merged
+  }
+
+  /**
+   * Merge consecutive ParticipantMessages from the same participant.
+   * This handles "m continue" scenarios where bot has multiple sequential messages
+   * that should appear as one turn in the LLM context.
+   */
+  private mergeConsecutiveParticipantMessages(
+    messages: ParticipantMessage[]
+  ): ParticipantMessage[] {
+    const merged: ParticipantMessage[] = []
+
+    for (const msg of messages) {
+      const lastMsg = merged[merged.length - 1]
+      
+      // Check if we should merge with previous message
+      if (lastMsg && lastMsg.participant === msg.participant) {
+        // Merge content arrays
+        // For text blocks, we join with space; for other types, just append
+        const lastTextBlockIndex = lastMsg.content.map(c => c.type).lastIndexOf('text')
+        const lastTextBlock = lastTextBlockIndex >= 0 ? lastMsg.content[lastTextBlockIndex] : null
+        const firstContentBlock = msg.content[0]
+        
+        if (lastTextBlock && lastTextBlock.type === 'text' && firstContentBlock?.type === 'text') {
+          // Join text with space
+          lastTextBlock.text = `${lastTextBlock.text} ${firstContentBlock.text}`
+          // Append remaining content blocks
+          lastMsg.content.push(...msg.content.slice(1))
+        } else {
+          // Just append all content blocks
+          lastMsg.content.push(...msg.content)
+        }
+        
+        // Keep the cache control if either message had it
+        if (msg.cacheControl) {
+          lastMsg.cacheControl = msg.cacheControl
+        }
+      } else {
+        // Different participant - start new message
+        merged.push({ ...msg, content: [...msg.content] })
       }
     }
 

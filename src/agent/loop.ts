@@ -1920,8 +1920,11 @@ export class AgentLoop {
 
   /**
    * Check if thinking was actually prefilled in the request.
-   * In continuation mode (m continue), the last message has content and thinking is NOT prefilled.
-   * We detect this by checking if the last participant message is empty (normal prefill) or has content (continuation).
+   * In continuation mode (m continue), the previous message is from the same bot and has content,
+   * so thinking is NOT prefilled - the middleware will merge them.
+   * 
+   * Context builder always adds an empty completion message at the end, so we need to check
+   * the second-to-last message to detect continuation mode.
    */
   private wasThinkingPrefilled(request: any, config: BotConfig): boolean {
     // If prefill_thinking is disabled, thinking was never prefilled
@@ -1929,26 +1932,59 @@ export class AgentLoop {
       return false
     }
     
-    // Check the last message in the request
+    // Check the messages in the request
     const messages = request.messages || []
     if (messages.length === 0) {
       return false
     }
     
     const lastMsg = messages[messages.length - 1]
+    const botName = config.name
     
-    // If last message has no content or only empty content, thinking was prefilled
-    // If it has actual content, it's a continuation and thinking was NOT prefilled
-    const content = lastMsg.content || []
-    const hasContent = content.some((c: any) => {
+    // If last message is not from the bot, something is wrong
+    if (lastMsg.participant !== botName) {
+      return false
+    }
+    
+    // Check if last message has content (would be unusual but handle it)
+    const lastContent = lastMsg.content || []
+    const lastHasContent = lastContent.some((c: any) => {
       if (c.type === 'text') {
         return c.text && c.text.trim().length > 0
       }
       return false
     })
     
-    // Thinking is prefilled when the last message is empty (just the participant name + <thinking>)
-    return !hasContent
+    if (lastHasContent) {
+      // Last message already has content - this shouldn't happen normally
+      // but if it does, thinking wasn't prefilled into an empty message
+      return false
+    }
+    
+    // Last message is empty (the completion placeholder).
+    // Check if the previous message is also from the bot and has content.
+    // If so, this is continuation mode (m continue) and thinking was NOT prefilled.
+    if (messages.length >= 2) {
+      const prevMsg = messages[messages.length - 2]
+      if (prevMsg.participant === botName) {
+        const prevContent = prevMsg.content || []
+        const prevHasContent = prevContent.some((c: any) => {
+          if (c.type === 'text') {
+            return c.text && c.text.trim().length > 0
+          }
+          return false
+        })
+        if (prevHasContent) {
+          // Previous message is from bot with content - this is continuation mode
+          // Thinking was NOT prefilled (middleware will continue from prev content)
+          return false
+        }
+      }
+    }
+    
+    // Normal case: empty last message, previous is from another participant
+    // Thinking was prefilled
+    return true
   }
 
   /**
