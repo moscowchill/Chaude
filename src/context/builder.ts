@@ -85,19 +85,21 @@ export class ContextBuilder {
     const filteredCount = beforeFilter - messages.length
 
     // 3. Convert to participant messages (limits applied later on final context)
+    // Pass botDiscordUsername so we can normalize bot's own messages to use config.name
     const participantMessages = await this.formatMessages(
       messages,
       discordContext.images,
       discordContext.documents,
-      config
+      config,
+      botDiscordUsername
     )
 
     // 5. Interleave historical tool use from cache (limited to last 5 calls with results)
     // Skip when preserve_thinking_context is enabled - activation store injection handles tool content
     if (!config.preserve_thinking_context) {
       // Tools are inserted chronologically where they occurred, not at the end
-      // Use Discord username for matching (what appears in msg.participant)
-      const toolMessagesByTrigger = this.formatToolUseWithResults(toolCacheWithResults, botDisplayName)
+      // Use config.name for bot's participant name (consistent with formatMessages normalization)
+      const toolMessagesByTrigger = this.formatToolUseWithResults(toolCacheWithResults, config.name)
       
       // Create a map of triggering message ID -> tool messages
       const toolsByMessageId = new Map<string, ParticipantMessage[]>()
@@ -141,10 +143,9 @@ export class ContextBuilder {
     }
 
     // 4.5. Inject activation completions if preserve_thinking_context is enabled
-    // Use Discord username for matching (what appears in msg.participant from Discord history)
-    const botParticipantName = botDiscordUsername || config.name
+    // Use config.name for bot's participant name (consistent with formatMessages normalization)
     if (config.preserve_thinking_context && activations && activations.length > 0) {
-      this.injectActivationCompletions(participantMessages, activations, botParticipantName)
+      this.injectActivationCompletions(participantMessages, activations, config.name)
     }
 
     // 4.6. Inject plugin context injections at calculated depths
@@ -176,12 +177,9 @@ export class ContextBuilder {
     }
 
     // 7. Add empty message for bot to complete
-    // Use botDiscordUsername if available, as it matches the participant names in Discord history.
-    // This is important for "m continue" to work correctly - the continuation check in middleware
-    // compares participant names, and Discord messages have the displayName, not innerName.
-    const completionParticipant = botDiscordUsername || config.name
+    // Always use config.name - bot's historical messages are also normalized to config.name
     participantMessages.push({
-      participant: completionParticipant,
+      participant: config.name,
       content: [{ type: 'text', text: '' }],
     })
 
@@ -623,7 +621,8 @@ export class ContextBuilder {
     messages: DiscordMessage[],
     images: CachedImage[],
     documents: CachedDocument[],
-    config: BotConfig
+    config: BotConfig,
+    botDiscordUsername?: string
   ): Promise<ParticipantMessage[]> {
     const participantMessages: ParticipantMessage[] = []
 
@@ -803,8 +802,29 @@ export class ContextBuilder {
         }
       }
 
+      // For bot's own messages, use config.name for consistent LLM context
+      // For other participants, use their Discord display name
+      const isBotMessage = botDiscordUsername && msg.author.displayName === botDiscordUsername
+      const participant = isBotMessage ? config.name : msg.author.displayName
+      
+      // Normalize mentions and replies to this bot to use config.name
+      // Discord mentions: <@username>, replies: <reply:@username>
+      if (botDiscordUsername && botDiscordUsername !== config.name) {
+        // Escape special regex characters in the username (e.g., dots in "Opus 4.5")
+        const escapedUsername = botDiscordUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const mentionPattern = new RegExp(`<@${escapedUsername}>`, 'g')
+        const replyPattern = new RegExp(`<reply:@${escapedUsername}>`, 'g')
+        for (const block of content) {
+          if (block.type === 'text') {
+            block.text = block.text
+              .replace(mentionPattern, `<@${config.name}>`)
+              .replace(replyPattern, `<reply:@${config.name}>`)
+          }
+        }
+      }
+      
       participantMessages.push({
-        participant: msg.author.displayName,
+        participant,
         content,
         timestamp: msg.timestamp,
         messageId: msg.id,

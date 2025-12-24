@@ -112,9 +112,9 @@ export class LLMMiddleware {
   private transformToPrefill(request: LLMRequest, _provider: LLMProvider): ProviderRequest {
     // Build conversation, splitting messages with images into user turns
     const messages: ProviderMessage[] = []
-    const botName = request.config.botName  // For labeling turns in the prompt
-    // For matching participant names, prefer Discord username (what appears in msg.participant)
-    const botParticipantName = request.config.botDiscordUsername || botName
+    // Bot's participant name in LLM context is always config.botName
+    // (context builder normalizes bot's Discord messages to use this name)
+    const botName = request.config.botName
     const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models
     // If using delimiter, don't add newlines between messages - delimiter provides separation
     const joiner = delimiter ? '' : '\n'
@@ -229,8 +229,8 @@ export class LLMMiddleware {
       }
       
       // Check bot continuation logic
-      // Use botParticipantName (Discord username) for matching, since msg.participant comes from Discord
-      const isBotMessage = msg.participant === botParticipantName
+      // Bot's participant name in LLM context is always botName (context builder normalizes it)
+      const isBotMessage = msg.participant === botName
       const hasToolResult = msg.content.some(c => c.type === 'tool_result')
       
       // Continuation mode: if the last message in the context is from the bot,
@@ -240,11 +240,11 @@ export class LLMMiddleware {
       // Historically this used lastNonEmptyParticipant, but that can be thrown off by
       // empty/filtered messages. Using the immediately previous message is more robust.
       const prevMsg = i > 0 ? request.messages[i - 1] : undefined
-      const prevIsBotMessage = !!prevMsg && prevMsg.participant === botParticipantName
+      const prevIsBotMessage = !!prevMsg && prevMsg.participant === botName
       const prevHasToolResult = !!prevMsg && prevMsg.content.some(c => c.type === 'tool_result')
       const isContinuation =
         isBotMessage && !hasToolResult && (
-          lastNonEmptyParticipant === botParticipantName ||
+          lastNonEmptyParticipant === botName ||
           (prevIsBotMessage && !prevHasToolResult)
         )
       

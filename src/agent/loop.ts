@@ -1170,6 +1170,9 @@ export class AgentLoop {
     const maxToolDepth = config.max_tool_depth
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     
+    // Check if thinking was actually prefilled (not in continuation mode)
+    const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
+    
     // Track context position for each message
     // Each sent message will get a context chunk from contextStartPos to contextEndPos
     let lastContextEndPos = 0
@@ -1221,12 +1224,14 @@ export class AgentLoop {
             continuationRequest,
             completion,
             triggeredStopSequence,
-            config
+            config,
+            thinkingWasPrefilled
           )
         } else if (triggeredStopSequence === AgentLoop.FUNC_CALLS_CLOSE) {
           // Check for unclosed thinking tag - need to continue
+          // Only assume thinking is open if it was actually prefilled (not in continuation mode)
           let unclosedTag = this.detectUnclosedXmlTag(completionText)
-          if (!unclosedTag && config.prefill_thinking && !completionText.includes('</thinking>')) {
+          if (!unclosedTag && thinkingWasPrefilled && !completionText.includes('</thinking>')) {
             unclosedTag = 'thinking'
           }
           if (unclosedTag) {
@@ -1234,7 +1239,8 @@ export class AgentLoop {
               continuationRequest,
               completion,
               triggeredStopSequence,
-              config
+              config,
+              thinkingWasPrefilled
             )
           }
         }
@@ -1242,8 +1248,8 @@ export class AgentLoop {
         // The check later will return early
       }
       
-      // Prepend thinking tag if prefilled
-      if (config.prefill_thinking && accumulatedOutput === '') {
+      // Prepend thinking tag if it was actually prefilled
+      if (thinkingWasPrefilled && accumulatedOutput === '') {
         const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
         if (firstTextBlock?.text) {
           firstTextBlock.text = '<thinking>' + firstTextBlock.text
@@ -1635,10 +1641,9 @@ export class AgentLoop {
     
     // Find the last message (should be empty bot message for completion)
     const lastMsg = request.messages[request.messages.length - 1]
-    // Use Discord username for matching (what appears in msg.participant from Discord history)
-    const botParticipantName = this.connector.getBotUsername() || config.name
+    // Bot's participant name in LLM context is always config.name
     
-    if (lastMsg && lastMsg.participant === botParticipantName) {
+    if (lastMsg && lastMsg.participant === config.name) {
       // Replace the last empty message with accumulated output
       request.messages[request.messages.length - 1] = {
         ...lastMsg,
@@ -1647,7 +1652,7 @@ export class AgentLoop {
     } else {
       // Add accumulated output as new message
       request.messages.push({
-        participant: botParticipantName,
+        participant: config.name,
         content: [{ type: 'text', text: trimmedOutput }],
       })
     }
@@ -1676,6 +1681,10 @@ export class AgentLoop {
     let allToolCallIds: string[] = []
     let allPreambleMessageIds: string[] = []
 
+    // Check if thinking was actually prefilled by examining the original request
+    // In continuation mode (m continue), the last message has content and thinking is NOT prefilled
+    const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
+    
     while (depth < config.max_tool_depth) {
       let completion = await this.llmMiddleware.complete(currentRequest)
 
@@ -1688,10 +1697,9 @@ export class AgentLoop {
           .join('')
         
         // Check if there's an unclosed XML tag (tool call or thinking)
-        // When prefill_thinking is enabled, the <thinking> tag was prefilled and won't be in the completion
-        // So we need to check if we're still inside a thinking block (no </thinking> found)
+        // Only assume thinking is open if it was actually prefilled (not in continuation mode)
         let unclosedTag = this.detectUnclosedXmlTag(completionText)
-        if (!unclosedTag && config.prefill_thinking && !completionText.includes('</thinking>')) {
+        if (!unclosedTag && thinkingWasPrefilled && !completionText.includes('</thinking>')) {
           unclosedTag = 'thinking'  // Prefilled thinking tag is still open
         }
         
@@ -1709,15 +1717,16 @@ export class AgentLoop {
               currentRequest,
               completion,
               triggeredStopSequence,
-              config
+              config,
+              thinkingWasPrefilled
             )
           }
         }
       }
 
-      // If prefill_thinking was enabled, prepend <thinking> to the first text block
+      // If thinking was actually prefilled, prepend <thinking> to the first text block
       // (the prefilled <thinking> isn't in the completion, only the content and </thinking>)
-      if (config.prefill_thinking) {
+      if (thinkingWasPrefilled) {
         const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
         if (firstTextBlock?.text) {
           firstTextBlock.text = '<thinking>' + firstTextBlock.text
@@ -1877,10 +1886,9 @@ export class AgentLoop {
         .map((c: any) => c.text)
         .join('\n')
       
-      // Use Discord username for participant (matches how context builder creates messages)
-      const botParticipantName = this.connector.getBotUsername() || config.name
+      // Bot's participant name in LLM context is always config.name
       currentRequest.messages.push({
-        participant: botParticipantName,
+        participant: config.name,
         content: [{ type: 'text', text: completionText }],
       })
 
@@ -1890,7 +1898,7 @@ export class AgentLoop {
 
       // Add empty message for next completion
       currentRequest.messages.push({
-        participant: botParticipantName,
+        participant: config.name,
         content: [{ type: 'text', text: '' }],
       })
 
@@ -1908,6 +1916,39 @@ export class AgentLoop {
       toolCallIds: allToolCallIds,
       preambleMessageIds: allPreambleMessageIds
     }
+  }
+
+  /**
+   * Check if thinking was actually prefilled in the request.
+   * In continuation mode (m continue), the last message has content and thinking is NOT prefilled.
+   * We detect this by checking if the last participant message is empty (normal prefill) or has content (continuation).
+   */
+  private wasThinkingPrefilled(request: any, config: BotConfig): boolean {
+    // If prefill_thinking is disabled, thinking was never prefilled
+    if (!config.prefill_thinking) {
+      return false
+    }
+    
+    // Check the last message in the request
+    const messages = request.messages || []
+    if (messages.length === 0) {
+      return false
+    }
+    
+    const lastMsg = messages[messages.length - 1]
+    
+    // If last message has no content or only empty content, thinking was prefilled
+    // If it has actual content, it's a continuation and thinking was NOT prefilled
+    const content = lastMsg.content || []
+    const hasContent = content.some((c: any) => {
+      if (c.type === 'text') {
+        return c.text && c.text.trim().length > 0
+      }
+      return false
+    })
+    
+    // Thinking is prefilled when the last message is empty (just the participant name + <thinking>)
+    return !hasContent
   }
 
   /**
@@ -1951,6 +1992,7 @@ export class AgentLoop {
     partialCompletion: any,
     stopSequence: string,
     config: BotConfig,
+    thinkingWasPrefilled: boolean = false,
     maxContinuations: number = 5
   ): Promise<any> {
     let accumulatedText = partialCompletion.content
@@ -1970,9 +2012,8 @@ export class AgentLoop {
       
       // Find and update the last assistant message (the prefill)
       const lastMessage = continuationRequest.messages[continuationRequest.messages.length - 1]
-      // Use Discord username for matching (what appears in msg.participant from Discord history)
-      const botParticipantName = this.connector.getBotUsername() || config.name
-      if (lastMessage?.participant === botParticipantName) {
+      // Bot's participant name in LLM context is always config.name
+      if (lastMessage?.participant === config.name) {
         // Append to existing prefill
         const existingText = lastMessage.content
           .filter((c: any) => c.type === 'text')
@@ -1982,7 +2023,7 @@ export class AgentLoop {
       } else {
         // Add new assistant message
         continuationRequest.messages.push({
-          participant: botParticipantName,
+          participant: config.name,
           content: [{ type: 'text', text: accumulatedText }],
         })
       }
@@ -2007,8 +2048,8 @@ export class AgentLoop {
       // Check if we need to continue again
       if (continuation.stopReason === 'stop_sequence') {
         let unclosedTag = this.detectUnclosedXmlTag(accumulatedText)
-        // Also check for prefilled thinking tag (no </thinking> means still open)
-        if (!unclosedTag && config.prefill_thinking && !accumulatedText.includes('</thinking>')) {
+        // Only assume thinking is open if it was actually prefilled (not in continuation mode)
+        if (!unclosedTag && thinkingWasPrefilled && !accumulatedText.includes('</thinking>')) {
           unclosedTag = 'thinking'
         }
         const newStopSequence = continuation.raw?.stop_sequence
