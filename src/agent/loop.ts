@@ -936,10 +936,11 @@ export class AgentLoop {
       if (!isInlineExecution) {
         // Truncate if model continues past a stop sequence (post-hoc enforcement)
         // This catches cases where the API ignored stop sequences (e.g., OpenRouter with >4 sequences)
+        // Use Discord username for participant matching (what appears in msg.author.username)
         const truncateResult = this.truncateAtParticipant(
           responseText, 
           discordContext.messages, 
-          config.innerName,
+          this.connector.getBotUsername() || config.name,
           contextResult.request.stop_sequences
         )
         responseText = truncateResult.text
@@ -1342,11 +1343,12 @@ export class AgentLoop {
       let sentMsgIdsThisRound: string[] = []
       
       // Check for hallucinated participant at start of message (before sending anything)
+      // Use Discord username for participant matching (what appears in msg.author.username)
       if (visibleBeforeText && discordMessages && toolDepth === 0) {
         const truncResult = this.truncateAtParticipant(
           visibleBeforeText, 
           discordMessages, 
-          config.innerName, 
+          this.connector.getBotUsername() || config.name, 
           llmRequest.stop_sequences
         )
         if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
@@ -1438,8 +1440,8 @@ export class AgentLoop {
             ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
             : flatOutput
           
-          const toolMessage = `.${config.innerName}>[${call.name}]: ${inputStr}\n.${config.innerName}<[${call.name}]: ${trimmedOutput}`
-          await this.connector.sendWebhook(channelId, toolMessage, config.innerName)
+          const toolMessage = `.${config.name}>[${call.name}]: ${inputStr}\n.${config.name}<[${call.name}]: ${trimmedOutput}`
+          await this.connector.sendWebhook(channelId, toolMessage, config.name)
         }
       }
       
@@ -1527,11 +1529,12 @@ export class AgentLoop {
     } = params
     
     // 1. Truncate at participant names (post-hoc enforcement)
+    // Use Discord username for participant matching (what appears in msg.author.username)
     if (discordMessages) {
       const truncResult = this.truncateAtParticipant(
         accumulatedOutput, 
         discordMessages, 
-        config.innerName, 
+        this.connector.getBotUsername() || config.name, 
         llmRequest.stop_sequences
       )
       if (truncResult.truncatedAt) {
@@ -1632,8 +1635,10 @@ export class AgentLoop {
     
     // Find the last message (should be empty bot message for completion)
     const lastMsg = request.messages[request.messages.length - 1]
+    // Use Discord username for matching (what appears in msg.participant from Discord history)
+    const botParticipantName = this.connector.getBotUsername() || config.name
     
-    if (lastMsg && lastMsg.participant === config.innerName) {
+    if (lastMsg && lastMsg.participant === botParticipantName) {
       // Replace the last empty message with accumulated output
       request.messages[request.messages.length - 1] = {
         ...lastMsg,
@@ -1642,7 +1647,7 @@ export class AgentLoop {
     } else {
       // Add accumulated output as new message
       request.messages.push({
-        participant: config.innerName,
+        participant: botParticipantName,
         content: [{ type: 'text', text: trimmedOutput }],
       })
     }
@@ -1859,8 +1864,8 @@ export class AgentLoop {
             ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
             : flatOutput
           
-          const toolMessage = `.${config.innerName}>[${toolCall.name}]: ${inputStr}\n.${config.innerName}<[${toolCall.name}]: ${trimmedOutput}`
-          await this.connector.sendWebhook(channelId, toolMessage, config.innerName)
+          const toolMessage = `.${config.name}>[${toolCall.name}]: ${inputStr}\n.${config.name}<[${toolCall.name}]: ${trimmedOutput}`
+          await this.connector.sendWebhook(channelId, toolMessage, config.name)
         }
       }
 
@@ -1872,8 +1877,10 @@ export class AgentLoop {
         .map((c: any) => c.text)
         .join('\n')
       
+      // Use Discord username for participant (matches how context builder creates messages)
+      const botParticipantName = this.connector.getBotUsername() || config.name
       currentRequest.messages.push({
-        participant: config.innerName,
+        participant: botParticipantName,
         content: [{ type: 'text', text: completionText }],
       })
 
@@ -1883,7 +1890,7 @@ export class AgentLoop {
 
       // Add empty message for next completion
       currentRequest.messages.push({
-        participant: config.innerName,
+        participant: botParticipantName,
         content: [{ type: 'text', text: '' }],
       })
 
@@ -1963,7 +1970,9 @@ export class AgentLoop {
       
       // Find and update the last assistant message (the prefill)
       const lastMessage = continuationRequest.messages[continuationRequest.messages.length - 1]
-      if (lastMessage?.participant === config.innerName) {
+      // Use Discord username for matching (what appears in msg.participant from Discord history)
+      const botParticipantName = this.connector.getBotUsername() || config.name
+      if (lastMessage?.participant === botParticipantName) {
         // Append to existing prefill
         const existingText = lastMessage.content
           .filter((c: any) => c.type === 'text')
@@ -1973,7 +1982,7 @@ export class AgentLoop {
       } else {
         // Add new assistant message
         continuationRequest.messages.push({
-          participant: config.innerName,
+          participant: botParticipantName,
           content: [{ type: 'text', text: accumulatedText }],
         })
       }

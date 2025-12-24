@@ -210,7 +210,6 @@ export class ConfigSystem {
     return {
       // Identity (required, no defaults)
       name: config.name || '',
-      innerName: config.innerName || config.name || '',
 
       // Model config
       mode: config.mode || 'prefill',

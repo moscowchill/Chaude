@@ -7,8 +7,7 @@ Chapter3 supports multiple MCP (Model Context Protocol) servers, allowing the bo
 Add `mcpServers` to your bot config (`config/bots/{botname}.yaml`):
 
 ```yaml
-name: Claude
-innerName: Claude
+name: Claude  # Name used in LLM context
 # ... other config ...
 
 toolsEnabled: true
@@ -218,8 +217,7 @@ cat tools/claude/*/2024-11-14-18.jsonl
 ## Example: Full Configuration
 
 ```yaml
-name: Claude
-innerName: Claude
+name: Claude  # Name used in LLM context
 
 mode: prefill
 continuationModel: claude-sonnet-4-5-20250929

@@ -320,8 +320,7 @@ class ConfigSystem {
 }
 
 interface BotConfig {
-  name: string
-  innerName: string
+  innerName: string  // Name used in LLM context
   
   // Model config
   mode: 'prefill' | 'chat'
@@ -1160,8 +1159,7 @@ See `config_examples.md` for detailed configuration examples.
 
 ```yaml
 # config/bots/claude.yaml
-name: Claude
-innerName: Claude
+name: Claude  # Name used in LLM context
 
 mode: prefill
 continuationModel: claude-3-5-sonnet-20241022

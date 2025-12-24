@@ -65,9 +65,11 @@ export class ContextBuilder {
     const mergedMessageIds = new Set<string>()
 
     // 1. Merge consecutive bot messages (skip when preserve_thinking_context to keep IDs for injection)
+    // Use Discord username for matching (what appears in msg.author.displayName from Discord)
+    const botDisplayName = botDiscordUsername || config.name
     if (!config.preserve_thinking_context) {
       const beforeMerge = messages.length
-    messages = this.mergeConsecutiveBotMessages(messages, config.innerName)
+    messages = this.mergeConsecutiveBotMessages(messages, botDisplayName)
       if (messages.length < beforeMerge) {
         // Some messages were merged - track them
         const afterIds = new Set(messages.map(m => m.id))
@@ -94,7 +96,8 @@ export class ContextBuilder {
     // Skip when preserve_thinking_context is enabled - activation store injection handles tool content
     if (!config.preserve_thinking_context) {
       // Tools are inserted chronologically where they occurred, not at the end
-      const toolMessagesByTrigger = this.formatToolUseWithResults(toolCacheWithResults, config.innerName)
+      // Use Discord username for matching (what appears in msg.participant)
+      const toolMessagesByTrigger = this.formatToolUseWithResults(toolCacheWithResults, botDisplayName)
       
       // Create a map of triggering message ID -> tool messages
       const toolsByMessageId = new Map<string, ParticipantMessage[]>()
@@ -138,8 +141,10 @@ export class ContextBuilder {
     }
 
     // 4.5. Inject activation completions if preserve_thinking_context is enabled
+    // Use Discord username for matching (what appears in msg.participant from Discord history)
+    const botParticipantName = botDiscordUsername || config.name
     if (config.preserve_thinking_context && activations && activations.length > 0) {
-      this.injectActivationCompletions(participantMessages, activations, config.innerName)
+      this.injectActivationCompletions(participantMessages, activations, botParticipantName)
     }
 
     // 4.6. Inject plugin context injections at calculated depths
@@ -171,8 +176,12 @@ export class ContextBuilder {
     }
 
     // 7. Add empty message for bot to complete
+    // Use botDiscordUsername if available, as it matches the participant names in Discord history.
+    // This is important for "m continue" to work correctly - the continuation check in middleware
+    // compares participant names, and Discord messages have the displayName, not innerName.
+    const completionParticipant = botDiscordUsername || config.name
     participantMessages.push({
-      participant: config.innerName,
+      participant: completionParticipant,
       content: [{ type: 'text', text: '' }],
     })
 
@@ -1385,7 +1394,7 @@ export class ContextBuilder {
       top_p: config.top_p,
       mode: config.mode,
       prefill_thinking: config.prefill_thinking,
-      botInnerName: config.innerName,
+      botName: config.name,
       botDiscordUsername,  // Bot's actual Discord username for chat mode message matching
       chatPersonaPrompt: config.chat_persona_prompt,
       chatPersonaPrefill: config.chat_persona_prefill,

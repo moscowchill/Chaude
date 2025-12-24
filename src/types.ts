@@ -127,7 +127,7 @@ export interface ModelConfig {
   top_p: number
   mode: 'prefill' | 'chat'
   prefill_thinking?: boolean  // If true, prefill with <thinking> tag
-  botInnerName: string  // For building stop sequences
+  botName: string  // Name used in LLM context (prefill labels, stop sequences)
   botDiscordUsername?: string  // Bot's actual Discord username for chat mode message matching
   chatPersonaPrompt?: boolean  // If true, add persona instruction system prompt for chat mode
   chatPersonaPrefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
@@ -143,8 +143,7 @@ export interface ModelConfig {
  */
 export interface BotConfig {
   // Identity
-  name: string
-  innerName: string  // Keep camelCase for internal use
+  name: string  // Name used in LLM context (prefill labels, stop sequences)
   
   // Model config
   mode: 'prefill' | 'chat'

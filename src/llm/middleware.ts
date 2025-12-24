@@ -112,7 +112,9 @@ export class LLMMiddleware {
   private transformToPrefill(request: LLMRequest, _provider: LLMProvider): ProviderRequest {
     // Build conversation, splitting messages with images into user turns
     const messages: ProviderMessage[] = []
-    const botName = request.config.botInnerName
+    const botName = request.config.botName  // For labeling turns in the prompt
+    // For matching participant names, prefer Discord username (what appears in msg.participant)
+    const botParticipantName = request.config.botDiscordUsername || botName
     const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models
     // If using delimiter, don't add newlines between messages - delimiter provides separation
     const joiner = delimiter ? '' : '\n'
@@ -227,7 +229,8 @@ export class LLMMiddleware {
       }
       
       // Check bot continuation logic
-      const isBotMessage = msg.participant === botName
+      // Use botParticipantName (Discord username) for matching, since msg.participant comes from Discord
+      const isBotMessage = msg.participant === botParticipantName
       const hasToolResult = msg.content.some(c => c.type === 'tool_result')
       
       // Continuation mode: if the last message in the context is from the bot,
@@ -237,11 +240,11 @@ export class LLMMiddleware {
       // Historically this used lastNonEmptyParticipant, but that can be thrown off by
       // empty/filtered messages. Using the immediately previous message is more robust.
       const prevMsg = i > 0 ? request.messages[i - 1] : undefined
-      const prevIsBotMessage = !!prevMsg && prevMsg.participant === botName
+      const prevIsBotMessage = !!prevMsg && prevMsg.participant === botParticipantName
       const prevHasToolResult = !!prevMsg && prevMsg.content.some(c => c.type === 'tool_result')
       const isContinuation =
         isBotMessage && !hasToolResult && (
-          lastNonEmptyParticipant === botName ||
+          lastNonEmptyParticipant === botParticipantName ||
           (prevIsBotMessage && !prevHasToolResult)
         )
       
@@ -320,7 +323,7 @@ export class LLMMiddleware {
 
   private transformToChat(request: LLMRequest, _provider: LLMProvider): ProviderRequest {
     const messages: ProviderMessage[] = []
-    const botInnerName = request.config.botInnerName
+    const botName = request.config.botName
     // Use Discord username for message matching (identifies bot's own messages accurately)
     const botDiscordUsername = request.config.botDiscordUsername
     const usePersonaPrompt = request.config.chatPersonaPrompt
@@ -339,7 +342,7 @@ export class LLMMiddleware {
     if (usePersonaPrompt) {
       messages.push({
         role: 'system',
-        content: `Respond to the chat, where your username is shown as ${botInnerName}. Only respond with the content of your message, without including your username.`,
+        content: `Respond to the chat, where your username is shown as ${botName}. Only respond with the content of your message, without including your username.`,
       })
     }
 
@@ -350,7 +353,7 @@ export class LLMMiddleware {
       // Match by Discord username if available, otherwise fall back to inner name
       const isBot = botAsAssistant && (botDiscordUsername 
         ? msg.participant === botDiscordUsername 
-        : msg.participant === botInnerName)
+        : msg.participant === botName)
 
       if (isBot) {
         // Flush buffer
@@ -378,12 +381,12 @@ export class LLMMiddleware {
       // Add persona prefill ending if configured (adds "botname:" to prompt completion)
       if (usePersonaPrefill) {
         if (typeof userMsg.content === 'string') {
-          userMsg.content = `${userMsg.content}:\n${botInnerName}:`
+          userMsg.content = `${userMsg.content}:\n${botName}:`
         } else if (Array.isArray(userMsg.content)) {
           // Find last text block and append
           const lastTextIdx = userMsg.content.map((c: any) => c.type).lastIndexOf('text')
           if (lastTextIdx >= 0) {
-            (userMsg.content[lastTextIdx] as any).text += `:\n${botInnerName}:`
+            (userMsg.content[lastTextIdx] as any).text += `:\n${botName}:`
           }
         }
       }

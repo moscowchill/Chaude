@@ -32,7 +32,7 @@ export function validateEnv(vars: string[]): void {
  * Validate bot configuration
  */
 export function validateBotConfig(config: any): void {
-  const required = ['name', 'innerName', 'continuation_model']
+  const required = ['name', 'continuation_model']
   const missing = required.filter((field) => !config[field])
   if (missing.length > 0) {
     throw new ConfigError(

@@ -60,8 +60,7 @@ The API will be available at `http://localhost:3000` (or your configured `API_PO
 Create `config/bots/your-bot-name.yaml`:
 
 ```yaml
-name: My Bot
-innerName: Claude
+name: Claude  # Name used in LLM context
 
 mode: prefill
 continuationModel: claude-3-5-sonnet-20241022
@@ -146,8 +145,7 @@ npm start
 
 ```yaml
 # Identity
-name: Bot Display Name
-innerName: BotName  # Used in LLM context
+name: BotName  # Name used in LLM context (prefill labels, stop sequences)
 
 # Model
 mode: prefill  # or 'chat'

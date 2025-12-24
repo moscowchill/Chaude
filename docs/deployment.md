@@ -204,8 +204,7 @@ providers:
 ### Bot Config Example
 
 ```yaml
-name: MyBot
-innerName: MyBot
+name: MyBot  # Name used in LLM context
 
 # Use shared provider
 providers_config: ../shared.yaml  # Relative to this config file
