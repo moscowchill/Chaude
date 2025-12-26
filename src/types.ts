@@ -178,7 +178,6 @@ export interface BotConfig {
   tools_enabled: boolean
   tool_output_visible: boolean
   max_tool_depth: number
-  inline_tool_execution: boolean  // Use Anthropic-style inline tool injection (saves tokens)
   mcp_servers?: MCPServerConfig[]
   tool_plugins?: string[]  // Plugin names to enable (e.g., ['config'])
   plugin_config?: Record<string, PluginInstanceConfig>  // Per-plugin configuration

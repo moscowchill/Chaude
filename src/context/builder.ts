@@ -16,7 +16,7 @@ import {
   BotConfig,
   ModelConfig,
 } from '../types.js'
-import { Activation, Completion } from '../activation/index.js'
+import { Activation, Completion, MessageContext } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
 import sharp from 'sharp'
 
@@ -1074,14 +1074,19 @@ export class ContextBuilder {
       messageCount: messages.length,
     }, 'Starting activation completion injection')
     
-    // Build unified messageContexts map from all activations (new per-message context system)
-    const messageContextsMap = new Map<string, string>()
+    // Build unified messageContexts map from all activations (prefix/suffix per message)
+    const messageContextsMap = new Map<string, MessageContext>()
     // Also track which activation each message belongs to (for consecutive merging)
     const messageToActivationId = new Map<string, string>()
     for (const activation of activations) {
       if (activation.messageContexts) {
-        for (const [msgId, contextChunk] of Object.entries(activation.messageContexts)) {
-          messageContextsMap.set(msgId, contextChunk)
+        for (const [msgId, context] of Object.entries(activation.messageContexts)) {
+          // Handle legacy format: string -> { prefix: string }
+          if (typeof context === 'string') {
+            messageContextsMap.set(msgId, { prefix: context })
+          } else {
+            messageContextsMap.set(msgId, context)
+          }
           messageToActivationId.set(msgId, activation.id)
         }
       }
@@ -1134,16 +1139,26 @@ export class ContextBuilder {
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]!
       
-      // Check if this message has a context chunk to inject (new per-message system)
+      // Check if this message has prefix/suffix to inject (new per-message system)
       if (msg.messageId && msg.participant === botName && messageContextsMap.has(msg.messageId)) {
-        const contextChunk = messageContextsMap.get(msg.messageId)!
-        // Replace content with per-message context chunk
-        msg.content = [{ type: 'text', text: contextChunk }]
+        const context = messageContextsMap.get(msg.messageId)!
+        
+        // Prepend prefix and append suffix to existing content
+        // This preserves the Discord message content while wrapping with invisible context
+        const existingText = msg.content
+          .filter(c => c.type === 'text')
+          .map(c => (c as { type: 'text'; text: string }).text)
+          .join('')
+        
+        const newText = (context.prefix || '') + existingText + (context.suffix || '')
+        msg.content = [{ type: 'text', text: newText }]
+        
         logger.debug({ 
           messageId: msg.messageId, 
-          contextLength: contextChunk.length,
-          hasToolXml: contextChunk.includes('function_calls'),
-        }, 'Injected per-message context chunk')
+          prefixLength: context.prefix?.length ?? 0,
+          suffixLength: context.suffix?.length ?? 0,
+          hasToolXml: context.prefix?.includes('function_calls') || context.suffix?.includes('function_calls'),
+        }, 'Injected prefix/suffix context')
       }
       // Fallback: check legacy completion map (for activations without messageContexts)
       else if (msg.messageId && msg.participant === botName && completionMap.has(msg.messageId)) {

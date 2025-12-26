@@ -42,6 +42,16 @@ export interface Completion {
   toolResults: ToolResult[]
 }
 
+/**
+ * Invisible content (thinking blocks, tool calls, tool results) associated with a Discord message.
+ * prefix: invisible content that appeared BEFORE this message's visible text
+ * suffix: invisible content that appeared AFTER (only for last message in a generation)
+ */
+export interface MessageContext {
+  prefix: string
+  suffix?: string
+}
+
 export interface Activation {
   id: string
   channelId: string
@@ -53,9 +63,9 @@ export interface Activation {
   // Ordered sequence of completions
   completions: Completion[]
   
-  // Per-message context chunks: messageId → LLM-visible context for that message
-  // Used for progressive display with inline tool execution
-  messageContexts: Record<string, string>
+  // Per-message invisible context: messageId → prefix/suffix to inject
+  // prefix is prepended to message content, suffix is appended
+  messageContexts: Record<string, MessageContext>
   
   // When this activation started
   startedAt: Date
@@ -73,7 +83,7 @@ export interface StoredActivation {
   botId: string
   trigger: ActivationTrigger
   completions: Completion[]
-  messageContexts: Record<string, string>
+  messageContexts: Record<string, MessageContext>
   startedAt: string  // ISO date string
   endedAt?: string
 }

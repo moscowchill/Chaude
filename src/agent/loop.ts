@@ -22,8 +22,18 @@ import {
   traceSetConfig,
   RawDiscordMessage,
 } from '../trace/index.js'
-import { ActivationStore, Activation, TriggerType } from '../activation/index.js'
+import { ActivationStore, Activation, TriggerType, MessageContext } from '../activation/index.js'
 import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.js'
+
+/**
+ * A segment of content: invisible prefix followed by visible text.
+ * The last segment in a generation may also have a suffix (trailing invisible).
+ */
+interface ContentSegment {
+  prefix: string    // invisible content before the visible text
+  visible: string   // visible text (what gets sent to Discord)
+  suffix?: string   // trailing invisible (only for last segment)
+}
 
 export class AgentLoop {
   private running = false
@@ -90,6 +100,220 @@ export class AgentLoop {
    */
   stop(): void {
     this.running = false
+  }
+
+  /**
+   * Parse a chunk into segments, splitting at invisible content boundaries.
+   * Each segment has a prefix (preceding invisible) and visible text.
+   * 
+   * Example: "<thinking>A</thinking>hello<thinking>B</thinking>world"
+   * Returns: [
+   *   { prefix: "<thinking>A</thinking>", visible: "hello" },
+   *   { prefix: "<thinking>B</thinking>", visible: "world" }
+   * ]
+   * 
+   * If the chunk ends with invisible content, the last segment gets a suffix.
+   */
+  private parseIntoSegments(fullChunk: string): ContentSegment[] {
+    // Find all invisible regions with their positions
+    interface Region { start: number; end: number; text: string }
+    const invisibleRegions: Region[] = []
+    
+    // Thinking blocks
+    const thinkingPattern = /<thinking>[\s\S]*?<\/thinking>/g
+    let match
+    while ((match = thinkingPattern.exec(fullChunk)) !== null) {
+      invisibleRegions.push({ start: match.index, end: match.index + match[0].length, text: match[0] })
+    }
+    
+    // Tool calls (function_calls blocks)
+    const toolPattern = /<function_calls>[\s\S]*?<\/function_calls>/g
+    while ((match = toolPattern.exec(fullChunk)) !== null) {
+      invisibleRegions.push({ start: match.index, end: match.index + match[0].length, text: match[0] })
+    }
+    
+    // Tool results - multiple formats:
+    // 1. System: <results>...</results> (legacy format)
+    // 2. <function_results>...</function_results> (current format)
+    const legacyResultPattern = /System:\s*<results>[\s\S]*?<\/results>/g
+    while ((match = legacyResultPattern.exec(fullChunk)) !== null) {
+      invisibleRegions.push({ start: match.index, end: match.index + match[0].length, text: match[0] })
+    }
+    
+    const funcResultPattern = /<function_results>[\s\S]*?<\/function_results>/g
+    while ((match = funcResultPattern.exec(fullChunk)) !== null) {
+      invisibleRegions.push({ start: match.index, end: match.index + match[0].length, text: match[0] })
+    }
+    
+    // Sort by position
+    invisibleRegions.sort((a, b) => a.start - b.start)
+    
+    // If no invisible content, return single segment with all visible
+    if (invisibleRegions.length === 0) {
+      const visible = fullChunk.trim()
+      return visible ? [{ prefix: '', visible }] : []
+    }
+    
+    // Build segments by walking through the chunk
+    const segments: ContentSegment[] = []
+    let currentPos = 0
+    let currentPrefix = ''
+    
+    for (const region of invisibleRegions) {
+      // Get visible text between currentPos and this invisible region
+      const visibleBefore = fullChunk.slice(currentPos, region.start).trim()
+      
+      if (visibleBefore) {
+        // We have visible text - create a segment
+        segments.push({ prefix: currentPrefix, visible: visibleBefore })
+        currentPrefix = region.text  // This invisible becomes prefix for next segment
+      } else {
+        // No visible text - accumulate invisible into current prefix
+        currentPrefix += region.text
+      }
+      
+      currentPos = region.end
+    }
+    
+    // Handle remaining content after last invisible region
+    const remainingVisible = fullChunk.slice(currentPos).trim()
+    
+    if (remainingVisible) {
+      // There's visible text after the last invisible
+      segments.push({ prefix: currentPrefix, visible: remainingVisible })
+    } else if (currentPrefix && segments.length > 0) {
+      // Trailing invisible with no visible after - becomes suffix of last segment
+      segments[segments.length - 1]!.suffix = currentPrefix
+    } else if (currentPrefix) {
+      // Only invisible content, no visible at all - phantom segment
+      // Return empty array (caller handles phantoms separately)
+    }
+    
+    return segments
+  }
+  
+  /**
+   * Extract ALL invisible content from a chunk, preserving order.
+   * This is a compatibility helper - prefer parseIntoSegments for proper segment-based sending.
+   */
+  private extractAllInvisible(fullChunk: string): string {
+    const segments = this.parseIntoSegments(fullChunk)
+    
+    // Collect all prefixes and the suffix
+    let allInvisible = ''
+    for (const seg of segments) {
+      allInvisible += seg.prefix
+    }
+    // Add suffix from last segment if present
+    if (segments.length > 0 && segments[segments.length - 1]!.suffix) {
+      allInvisible += segments[segments.length - 1]!.suffix
+    }
+    
+    return allInvisible
+  }
+  
+  /**
+   * Truncate segments at a given position in the combined visible text.
+   * Returns segments up to (and including partial) that position.
+   */
+  private truncateSegmentsAtPosition(segments: ContentSegment[], position: number): ContentSegment[] {
+    const result: ContentSegment[] = []
+    let accumulatedLength = 0
+    
+    for (const segment of segments) {
+      const segmentEnd = accumulatedLength + segment.visible.length
+      
+      if (segmentEnd <= position) {
+        // This segment is fully within the truncation point
+        result.push(segment)
+        accumulatedLength = segmentEnd
+      } else if (accumulatedLength < position) {
+        // This segment spans the truncation point - truncate it
+        const keepLength = position - accumulatedLength
+        result.push({
+          prefix: segment.prefix,
+          visible: segment.visible.slice(0, keepLength).trim(),
+          // Don't keep suffix - we're truncating
+        })
+        break
+      } else {
+        // We've passed the truncation point
+        break
+      }
+    }
+    
+    return result
+  }
+  
+  /**
+   * Send segments to Discord, preserving invisible content associations.
+   * Each segment's visible text is sent as a Discord message (may be chunked if >2000 chars).
+   * Returns all sent message IDs and their context (prefix/suffix).
+   * 
+   * For segments with no visible text (phantom), the invisible content is stored
+   * as suffix of the previous message, or returned as orphanedInvisible if no messages sent.
+   */
+  private async sendSegments(
+    channelId: string,
+    segments: ContentSegment[],
+    replyToMessageId?: string
+  ): Promise<{
+    sentMessageIds: string[]
+    messageContexts: Record<string, MessageContext>
+    orphanedInvisible: string  // Invisible content with no message to attach to
+  }> {
+    const sentMessageIds: string[] = []
+    const messageContexts: Record<string, MessageContext> = {}
+    let orphanedInvisible = ''
+    
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i]!
+      
+      // Send this segment's visible text
+      const msgIds = await this.connector.sendMessage(
+        channelId,
+        segment.visible,
+        i === 0 ? replyToMessageId : undefined  // Only reply on first segment
+      )
+      
+      // Track message IDs
+      sentMessageIds.push(...msgIds)
+      msgIds.forEach(id => this.botMessageIds.add(id))
+      
+      if (msgIds.length > 0) {
+        // First message of this segment gets the prefix
+        const firstMsgId = msgIds[0]!
+        messageContexts[firstMsgId] = { prefix: segment.prefix }
+        
+        // Middle messages get empty context
+        for (let j = 1; j < msgIds.length - 1; j++) {
+          messageContexts[msgIds[j]!] = { prefix: '' }
+        }
+        
+        // Last message (if different from first) - will get suffix if present
+        const lastMsgId = msgIds[msgIds.length - 1]!
+        if (lastMsgId !== firstMsgId) {
+          messageContexts[lastMsgId] = { prefix: '' }
+        }
+        
+        // If this segment has a suffix, add it to the last message
+        if (segment.suffix) {
+          const existing = messageContexts[lastMsgId]
+          messageContexts[lastMsgId] = { 
+            prefix: existing?.prefix ?? '',
+            suffix: segment.suffix 
+          }
+        }
+      }
+    }
+    
+    // If we have orphaned invisible (from phantom segments at the start), track it
+    // This shouldn't happen often, but handle it for completeness
+    if (segments.length === 0) {
+      // Caller should handle this case - no visible content at all
+    }
+    
+    return { sentMessageIds, messageContexts, orphanedInvisible }
   }
 
   private async processBatch(events: Event[]): Promise<void> {
@@ -379,31 +603,6 @@ export class AgentLoop {
     return { stripped: result, content }
   }
 
-  /**
-   * Strip tool call XML and thinking blocks from text, leaving any preamble/surrounding text
-   * e.g., "Let me check that <read_graph>{}</read_graph>" -> "Let me check that"
-   * e.g., "<thinking>reasoning</thinking><tool>{}</tool>" -> ""
-   */
-  private stripToolCallsFromText(text: string, toolUseBlocks: any[]): string {
-    // Strip thinking blocks first (respecting backtick escaping)
-    let result = this.stripThinkingBlocks(text).stripped
-    
-    // Get tool names that were parsed
-    const toolNames = toolUseBlocks.map(b => b.name)
-    
-    // Remove each tool call XML pattern
-    for (const name of toolNames) {
-      // Pattern matches: <tool_name>...</tool_name> with optional JSON inside
-      const pattern = new RegExp(`<${name}>\\s*(?:\\{[\\s\\S]*?\\})?\\s*</${name}>`, 'g')
-      result = result.replace(pattern, '')
-    }
-    
-    // Clean up extra whitespace
-    result = result.replace(/\n{3,}/g, '\n\n').trim()
-    
-    return result
-  }
-
   private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
     // Load config early for API-only mode check
     let config: any = null
@@ -619,7 +818,7 @@ export class AgentLoop {
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
       })
       endProfile('fetchContext')
-
+      
       // Note: Cache stability anchor is now set AFTER context building, based on the first 
       // message in the final request (not the first fetched message). This ensures we only
       // anchor to content we're actually sending to the LLM. See the cacheOldestMessageId
@@ -880,13 +1079,8 @@ export class AgentLoop {
         imagesFetched: discordContext.images.length,
       }, '⏱️  PROFILING: Pre-LLM phase timings (ms)')
 
-      // 6. Call LLM (with tool loop)
+      // 6. Call LLM (with inline tool execution)
       startProfile('llmCall')
-      
-      // Use inline tool execution if enabled (Anthropic-style, saves tokens)
-      const executeMethod = config.inline_tool_execution 
-        ? this.executeWithInlineTools.bind(this)
-        : this.executeWithTools.bind(this)
       
       const { 
         completion, 
@@ -895,7 +1089,7 @@ export class AgentLoop {
         fullCompletionText,
         sentMessageIds: inlineSentMessageIds,
         messageContexts: inlineMessageContexts
-      } = await executeMethod(
+      } = await this.executeWithInlineTools(
         contextResult.request, 
         config, 
         channelId,
@@ -914,118 +1108,37 @@ export class AgentLoop {
         logger.warn({ stopReason: completion.stopReason }, 'LLM refused to complete request')
       }
 
-      // 8. Process and send response
-      // For inline execution, messages are already sent and processed by finalizeInlineExecution
-      // For legacy execution, we need to process and send here
-      const isInlineExecution = inlineSentMessageIds && inlineSentMessageIds.length > 0
+      // 8. Collect sent message IDs and handle reactions
+      // Inline execution (executeWithInlineTools) already sent messages progressively.
+      // For phantoms (all thinking, no visible text), sentMessageIds will be empty -
+      // that's fine, the invisible content is stored via addCompletion and injected later.
+      const sentMessageIds = inlineSentMessageIds ?? []
       
-      let responseText = completion.content
+      // Extract response text for tracing (display text without thinking/tools)
+      const responseText = completion.content
         .filter((c: any) => c.type === 'text')
         .map((c: any) => c.text)
         .join('\n')
-
+      
       logger.debug({
         contentBlocks: completion.content.length,
         textBlocks: completion.content.filter((c: any) => c.type === 'text').length,
         responseLength: responseText.length,
-        isInlineExecution,
-      }, 'Extracted response text')
+        sentMessageCount: sentMessageIds.length,
+        isPhantom: sentMessageIds.length === 0,
+      }, 'Collected sent message IDs')
 
-      // For non-inline execution, apply truncation and stripping
-      // (Inline execution already did this in finalizeInlineExecution)
-      if (!isInlineExecution) {
-        // Truncate if model continues past a stop sequence (post-hoc enforcement)
-        // This catches cases where the API ignored stop sequences (e.g., OpenRouter with >4 sequences)
-        // Use Discord username for participant matching (what appears in msg.author.username)
-        const truncateResult = this.truncateAtParticipant(
-          responseText, 
-          discordContext.messages, 
-          this.connector.getBotUsername() || config.name,
-          contextResult.request.stop_sequences
-        )
-        responseText = truncateResult.text
-
-        // Strip ALL <thinking>...</thinking> sections (respecting backtick escaping)
-        const { stripped: strippedResponse, content: thinkingContents } = this.stripThinkingBlocks(responseText)
-        
-        if (thinkingContents.length > 0) {
-          const allThinkingContent = thinkingContents.join('\n\n---\n\n')
-          
-          logger.debug({ 
-            thinkingBlocks: thinkingContents.length,
-            totalThinkingLength: allThinkingContent.length 
-          }, 'Stripped thinking sections from response')
-          
-          // Send thinking as debug message if enabled
-          if (config.debug_thinking && allThinkingContent) {
-            const thinkingDebugContent = `.💭 ${allThinkingContent}`
-            if (thinkingDebugContent.length <= 1800) {
-              // Send as regular message
-              await this.connector.sendMessage(channelId, thinkingDebugContent, triggeringMessageId)
-            } else {
-              // Send as text file attachment
-              await this.connector.sendMessageWithAttachment(
-                channelId,
-                '.💭',
-                {
-                  name: 'thinking.txt',
-                  content: allThinkingContent,
-                },
-                triggeringMessageId
-              )
-            }
-          }
-          
-          // Use the already-stripped response
-          responseText = strippedResponse.trim()
-        }
-
-      // Strip <reply:@username> prefix if bot included it (bot responses are already Discord replies)
-      const replyPattern = /^\s*<reply:@[^>]+>\s*/
-      if (replyPattern.test(responseText)) {
-        responseText = responseText.replace(replyPattern, '')
-        logger.debug('Stripped reply prefix from bot response')
-      }
-
-      // Replace <@username> with <@USER_ID> for Discord mentions
-      responseText = await this.replaceMentions(responseText, discordContext.messages)
-      }
-
-      let sentMessageIds: string[] = []
-      
-      // Check if inline execution already sent messages
-      if (inlineSentMessageIds && inlineSentMessageIds.length > 0) {
-        // Inline execution already sent messages progressively
-        sentMessageIds = inlineSentMessageIds
-        logger.debug({ sentMessageIds }, 'Using message IDs from inline tool execution')
-        
-        // Handle refusal reactions
-        if (wasRefused && sentMessageIds.length > 0) {
-          for (const msgId of sentMessageIds) {
-            await this.connector.addReaction(channelId, msgId, '🛑')
-          }
-          logger.info({ sentMessageIds }, 'Added refusal reaction to inline-sent messages')
-        }
-      } else if (responseText.trim()) {
-        // Send as reply to triggering message (legacy path for non-inline execution)
-        sentMessageIds = await this.connector.sendMessage(channelId, responseText, triggeringMessageId)
-        // Track bot's message IDs for reply detection
-        sentMessageIds.forEach((id) => this.botMessageIds.add(id))
-        
-        // If refusal with content, add reaction to sent message(s)
-        if (wasRefused && sentMessageIds.length > 0) {
+      // Handle refusal reactions
+      if (wasRefused) {
+        if (sentMessageIds.length > 0) {
           for (const msgId of sentMessageIds) {
             await this.connector.addReaction(channelId, msgId, '🛑')
           }
           logger.info({ sentMessageIds }, 'Added refusal reaction to sent messages')
-        }
-      } else {
-        logger.warn('No text content to send in response')
-        
-        // If refusal with no content, add reaction to triggering message
-        if (wasRefused && triggeringMessageId) {
+        } else if (triggeringMessageId) {
+          // Phantom refusal - react to triggering message
           await this.connector.addReaction(channelId, triggeringMessageId, '🛑')
-          logger.info({ triggeringMessageId }, 'Added refusal reaction to triggering message (no content sent)')
+          logger.info({ triggeringMessageId }, 'Added refusal reaction to triggering message (phantom)')
         }
       }
       
@@ -1159,14 +1272,14 @@ export class AgentLoop {
     preambleMessageIds: string[]; 
     fullCompletionText?: string;
     sentMessageIds: string[];
-    messageContexts: Record<string, string>;
+    messageContexts: Record<string, MessageContext>;
   }> {
     let accumulatedOutput = ''
     let toolDepth = 0
     const allToolCallIds: string[] = []
     const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
-    const messageContexts: Record<string, string> = {}
+    const messageContexts: Record<string, MessageContext> = {}
     const maxToolDepth = config.max_tool_depth
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     
@@ -1342,24 +1455,22 @@ export class AgentLoop {
         toolDepth 
       }, 'Executing inline tools')
       
-      // PROGRESSIVE DISPLAY: Send the visible text before tool calls to Discord
-      // Strip both tool XML and thinking blocks to get display text
-      const strippedToolXml = this.toolSystem.stripToolXml(toolParse.beforeText)
-      let visibleBeforeText = this.stripThinkingBlocks(strippedToolXml).stripped.trim()
+      // PROGRESSIVE DISPLAY: Send visible text before tool calls, split at invisible boundaries
+      // Parse beforeText into segments (preserves invisible content associations)
+      let segments = this.parseIntoSegments(toolParse.beforeText)
       let sentMsgIdsThisRound: string[] = []
       
-      // Check for hallucinated participant at start of message (before sending anything)
-      // Use Discord username for participant matching (what appears in msg.author.username)
-      if (visibleBeforeText && discordMessages && toolDepth === 0) {
+      // Check for hallucinated participant in combined visible text
+      if (segments.length > 0 && discordMessages && toolDepth === 0) {
+        const fullVisibleText = segments.map(s => s.visible).join('')
         const truncResult = this.truncateAtParticipant(
-          visibleBeforeText, 
+          fullVisibleText, 
           discordMessages, 
           this.connector.getBotUsername() || config.name, 
           llmRequest.stop_sequences
         )
         if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
           // Response started with another participant - complete hallucination
-          // Abort and return empty response
           logger.warn({ truncatedAt: truncResult.truncatedAt }, 'Aborting inline execution - response started with hallucinated participant')
           return this.finalizeInlineExecution({
             accumulatedOutput: '',  // Discard everything
@@ -1377,27 +1488,32 @@ export class AgentLoop {
             stopReason: 'hallucination',
           })
         }
-        // Apply any mid-text truncation
+        // Apply truncation to segments if needed
         if (truncResult.truncatedAt) {
-          logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated pre-tool text at participant')
-          visibleBeforeText = truncResult.text.trim()
+          logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating pre-tool text at participant')
+          segments = this.truncateSegmentsAtPosition(segments, truncResult.text.length)
         }
       }
       
-      if (visibleBeforeText) {
-        // Send the pre-tool visible text as a message
-        sentMsgIdsThisRound = await this.connector.sendMessage(
-          channelId, 
-          visibleBeforeText, 
-          toolDepth === 0 ? triggeringMessageId : undefined  // Only reply to trigger on first message
+      if (segments.length > 0) {
+        // Send segments, preserving invisible content associations
+        const sendResult = await this.sendSegments(
+          channelId,
+          segments,
+          toolDepth === 0 ? triggeringMessageId : undefined  // Only reply on first message
         )
+        sentMsgIdsThisRound = sendResult.sentMessageIds
         allSentMessageIds.push(...sentMsgIdsThisRound)
-        sentMsgIdsThisRound.forEach(id => this.botMessageIds.add(id))
+        
+        // Merge contexts
+        for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+          messageContexts[msgId] = ctx
+        }
         
         logger.debug({ 
           messageIds: sentMsgIdsThisRound, 
-          textLength: visibleBeforeText.length 
-        }, 'Sent pre-tool message to Discord')
+          segmentCount: segments.length 
+        }, 'Sent pre-tool segments to Discord')
       }
       
       const resultsTexts: string[] = []
@@ -1456,13 +1572,13 @@ export class AgentLoop {
       const newAccumulated = toolParse.beforeText + toolParse.fullMatch + 
         this.toolSystem.formatToolResultForInjection('', resultsText)
       
-      // CONTEXT TRACKING: Associate sent messages with their context chunks
-      // The context chunk is everything from lastContextEndPos to current position (after tool result)
+      // Context tracking is now handled by sendSegments - the segments already have their 
+      // prefixes tracked. The tool call + results become invisible content that will be 
+      // the prefix of the next visible segment (when model continues).
+      // Update lastContextEndPos to track where we've processed.
       if (sentMsgIdsThisRound.length > 0) {
-        const contextChunk = newAccumulated.slice(lastContextEndPos)
-        for (const msgId of sentMsgIdsThisRound) {
-          messageContexts[msgId] = contextChunk
-        }
+        // We've sent segments from beforeText. The tool call + results are new invisible
+        // content that will be picked up as prefix in the next iteration.
         lastContextEndPos = newAccumulated.length
       }
       
@@ -1508,7 +1624,7 @@ export class AgentLoop {
     allToolCallIds: string[];
     allPreambleMessageIds: string[];
     allSentMessageIds: string[];
-    messageContexts: Record<string, string>;
+    messageContexts: Record<string, MessageContext>;
     lastContextEndPos: number;
     channelId: string;
     triggeringMessageId: string;
@@ -1523,7 +1639,7 @@ export class AgentLoop {
     preambleMessageIds: string[];
     fullCompletionText: string;
     sentMessageIds: string[];
-    messageContexts: Record<string, string>;
+    messageContexts: Record<string, MessageContext>;
     actualSentText: string;  // For trace validation
   }> {
     let { accumulatedOutput } = params
@@ -1534,69 +1650,92 @@ export class AgentLoop {
       suffix, stopReason
     } = params
     
-    // 1. Truncate at participant names (post-hoc enforcement)
-    // Use Discord username for participant matching (what appears in msg.author.username)
-    if (discordMessages) {
+    // 1. Get remaining output (after what was already sent)
+    const remainingOutput = accumulatedOutput.slice(lastContextEndPos)
+    
+    // 2. Truncate at participant names (on the remaining output, preserving invisible)
+    let truncatedRemaining = remainingOutput
+    if (discordMessages && remainingOutput) {
       const truncResult = this.truncateAtParticipant(
-        accumulatedOutput, 
+        remainingOutput, 
         discordMessages, 
         this.connector.getBotUsername() || config.name, 
         llmRequest.stop_sequences
       )
       if (truncResult.truncatedAt) {
         logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated inline output at participant')
-        accumulatedOutput = truncResult.text
+        truncatedRemaining = truncResult.text
+        // Also truncate accumulatedOutput for persistence
+        accumulatedOutput = accumulatedOutput.slice(0, lastContextEndPos) + truncatedRemaining
       }
     }
     
-    // 2. Persist all pending tool uses with the final (truncated) accumulated output
+    // 3. Persist all pending tool uses with the final (truncated) accumulated output
     for (const { call, result } of pendingToolPersistence) {
       call.originalCompletionText = accumulatedOutput
       await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
     }
     
-    // 3. Calculate display text and remaining unsent portion
-    let displayText = this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput)).stripped
-    const sentSoFar = lastContextEndPos > 0 
-      ? this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput.slice(0, lastContextEndPos))).stripped.length 
-      : 0
-    let remainingText = displayText.slice(sentSoFar).trim()
-    
-    // 4. Strip <reply:@username> prefix if bot included it
-    const replyPattern = /^\s*<reply:@[^>]+>\s*/
-    if (replyPattern.test(remainingText)) {
-      remainingText = remainingText.replace(replyPattern, '')
-    }
-    
-    // 5. Replace <@username> with <@USER_ID> for Discord mentions
-    if (discordMessages) {
-      remainingText = await this.replaceMentions(remainingText, discordMessages)
-      displayText = await this.replaceMentions(displayText, discordMessages)
-    }
-    
-    // 6. Add suffix if provided
+    // 4. Parse remaining output into segments
     const suffixText = suffix ? `\n${suffix}` : ''
-    if (remainingText && suffix) {
-      remainingText += suffixText
+    let segments = this.parseIntoSegments(truncatedRemaining + suffixText)
+    
+    // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
+    if (discordMessages) {
+      for (const segment of segments) {
+        segment.visible = await this.replaceMentions(segment.visible, discordMessages)
+      }
     }
     
-    // 8. Send remaining text to Discord
+    // 6. Strip <reply:@username> prefix from first segment if present
+    const replyPattern = /^\s*<reply:@[^>]+>\s*/
+    if (segments.length > 0 && replyPattern.test(segments[0]!.visible)) {
+      segments[0]!.visible = segments[0]!.visible.replace(replyPattern, '').trim()
+      // Remove segment if it became empty
+      if (!segments[0]!.visible) {
+        // Move prefix to next segment or track as orphaned
+        if (segments.length > 1) {
+          segments[1]!.prefix = segments[0]!.prefix + segments[1]!.prefix
+        }
+        segments.shift()
+      }
+    }
+    
+    // 7. Send segments to Discord
     let actualSentText = ''
-    if (remainingText) {
-      actualSentText = remainingText
-      const finalMsgIds = await this.connector.sendMessage(
+    if (segments.length > 0) {
+      const sendResult = await this.sendSegments(
         channelId, 
-        remainingText, 
+        segments, 
         allSentMessageIds.length === 0 ? triggeringMessageId : undefined
       )
-      allSentMessageIds.push(...finalMsgIds)
-      finalMsgIds.forEach(id => this.botMessageIds.add(id))
+      allSentMessageIds.push(...sendResult.sentMessageIds)
       
-      // Context chunk for final message
-      const finalContext = accumulatedOutput.slice(lastContextEndPos) + suffixText
-      for (const msgId of finalMsgIds) {
-        messageContexts[msgId] = finalContext
+      // Merge contexts
+      for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+        messageContexts[msgId] = ctx
       }
+      
+      actualSentText = segments.map(s => s.visible).join('')
+    }
+    
+    // 8. Handle phantom invisible (only invisible content, no visible)
+    // This happens when the model outputs only thinking/tool results at the end
+    const allInvisible = this.extractAllInvisible(truncatedRemaining)
+    if (!segments.length && allInvisible && allSentMessageIds.length > 0) {
+      // Attach invisible as suffix to last sent message
+      const lastMsgId = allSentMessageIds[allSentMessageIds.length - 1]!
+      const existing = messageContexts[lastMsgId]
+      messageContexts[lastMsgId] = {
+        prefix: existing?.prefix ?? '',
+        suffix: (existing?.suffix || '') + allInvisible
+      }
+    }
+    
+    // 9. Calculate full display text for trace
+    let displayText = this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput)).stripped
+    if (discordMessages) {
+      displayText = await this.replaceMentions(displayText, discordMessages)
     }
     
     // 9. Build final completion text for trace
@@ -1617,7 +1756,7 @@ export class AgentLoop {
       actualSentText,
     }
   }
-
+  
   /**
    * Build a continuation request with accumulated output as prefill
    */
@@ -1660,271 +1799,14 @@ export class AgentLoop {
     return request
   }
 
-  private async executeWithTools(
-    llmRequest: any,
-    config: BotConfig,
-    channelId: string,
-    triggeringMessageId: string,
-    activationId?: string,  // Optional activation ID for recording completions
-    _discordMessages?: DiscordMessage[]  // Unused here, for signature compatibility
-  ): Promise<{ 
-    completion: any; 
-    toolCallIds: string[]; 
-    preambleMessageIds: string[]; 
-    fullCompletionText?: string;
-    sentMessageIds?: string[];
-    messageContexts?: Record<string, string>;
-  }> {
-    let depth = 0
-    let currentRequest = llmRequest
-    let allToolResults: Array<{ call: any; result: any }> = []
-    let allToolCallIds: string[] = []
-    let allPreambleMessageIds: string[] = []
-
-    // Check if thinking was actually prefilled by examining the original request
-    // In continuation mode (m continue), the last message has content and thinking is NOT prefilled
-    const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
-    
-    while (depth < config.max_tool_depth) {
-      let completion = await this.llmMiddleware.complete(currentRequest)
-
-      // Handle stop sequence mid-XML-block: continue the completion
-      // This can happen when participant names appear inside tool call arguments or thinking blocks
-      if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
-        const completionText = completion.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
-          .join('')
-        
-        // Check if there's an unclosed XML tag (tool call or thinking)
-        // Only assume thinking is open if it was actually prefilled (not in continuation mode)
-        let unclosedTag = this.detectUnclosedXmlTag(completionText)
-        if (!unclosedTag && thinkingWasPrefilled && !completionText.includes('</thinking>')) {
-          unclosedTag = 'thinking'  // Prefilled thinking tag is still open
-        }
-        
-        if (unclosedTag) {
-          const triggeredStopSequence = completion.raw?.stop_sequence
-          logger.warn({ 
-            unclosedTag, 
-            triggeredStopSequence,
-            textLength: completionText.length 
-          }, 'Stop sequence fired mid-XML-block, continuing completion')
-          
-          if (triggeredStopSequence) {
-            // Continue the completion: append stop sequence and call again
-            completion = await this.continueCompletionAfterStopSequence(
-              currentRequest,
-              completion,
-              triggeredStopSequence,
-              config,
-              thinkingWasPrefilled
-            )
-          }
-        }
-      }
-
-      // If thinking was actually prefilled, prepend <thinking> to the first text block
-      // (the prefilled <thinking> isn't in the completion, only the content and </thinking>)
-      if (thinkingWasPrefilled) {
-        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
-        if (firstTextBlock?.text) {
-          firstTextBlock.text = '<thinking>' + firstTextBlock.text
-        }
-      }
-
-      // Get full completion text for recording
-      const fullCompletionText = completion.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
-          .join('\n')
-        
-      // Check for tool use (native tool_use blocks in chat mode)
-      let toolUseBlocks = completion.content.filter((c) => c.type === 'tool_use')
-
-      // In prefill mode, also parse tool calls from text (XML format)
-      if (toolUseBlocks.length === 0 && config.mode === 'prefill') {
-        const parsedResults = this.toolSystem.parseToolCalls(fullCompletionText, fullCompletionText)
-        
-        if (parsedResults.length > 0) {
-          logger.debug({ parsedCount: parsedResults.length }, 'Parsed tool calls from prefill text')
-          // Convert parsed calls to tool_use blocks, preserving original text
-          toolUseBlocks = parsedResults.map(pr => ({
-            type: 'tool_use' as const,
-            id: pr.call.id,
-            name: pr.call.name,
-            input: pr.call.input,
-            originalText: pr.originalText,
-          }))
-        }
-      }
-
-      if (toolUseBlocks.length === 0) {
-        // No tools, return completion (final completion will be recorded by handleActivation)
-        return { completion, toolCallIds: allToolCallIds, preambleMessageIds: allPreambleMessageIds }
-      }
-
-      // Execute tools
-      logger.debug({ toolCount: toolUseBlocks.length, depth }, 'Executing tools')
-
-      // In prefill mode, send any text before the tool call to Discord
-      // (e.g., "Let me search for that" before <tool_call>{}</tool_call>)
-      // Track preamble message IDs so they can be filtered from context later
-      // (the tool cache has the full completion with tool call)
-      if (config.mode === 'prefill') {
-        const textContent = completion.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
-          .join('\n')
-        
-        // Extract thinking content (respecting backtick escaping)
-        const { content: thinkingContents } = this.stripThinkingBlocks(textContent)
-        
-        // Send thinking content if debug_thinking is enabled
-        if (config.debug_thinking && thinkingContents.length > 0) {
-          const thinkingContent = thinkingContents.join('\n\n---\n\n')
-          const thinkingDebugContent = `.💭 ${thinkingContent}`
-          if (thinkingDebugContent.length <= 1800) {
-            await this.connector.sendMessage(channelId, thinkingDebugContent, triggeringMessageId)
-          } else {
-            await this.connector.sendMessageWithAttachment(
-              channelId,
-              '.💭',
-              { name: 'thinking.txt', content: thinkingContent },
-              triggeringMessageId
-            )
-          }
-        }
-        
-        // Strip tool call XML and thinking from text to get the "preamble"
-        const preamble = this.stripToolCallsFromText(textContent, toolUseBlocks)
-        let preambleIds: string[] = []
-        if (preamble.trim()) {
-          logger.debug({ preambleLength: preamble.length }, 'Sending tool call preamble to Discord')
-          preambleIds = await this.connector.sendMessage(channelId, preamble.trim(), triggeringMessageId)
-          allPreambleMessageIds.push(...preambleIds)
-        }
-        
-        // Record this completion to activation (tool call completion)
-        // sentMessageIds = preamble messages (could be empty if no preamble/all thinking = phantom)
-        if (activationId && config.preserve_thinking_context) {
-          this.activationStore.addCompletion(
-            activationId,
-            fullCompletionText,
-            preambleIds,
-            [], // Tool calls tracked separately for now
-            []
-          )
-        }
-      }
-
-      const toolResults: Array<{ call: any; result: any }> = []
-
-      for (const block of toolUseBlocks) {
-          const toolUse = block as any
-        const toolCall = {
-          id: toolUse.id,
-          name: toolUse.name,
-          input: toolUse.input,
-          messageId: triggeringMessageId,
-          timestamp: new Date(),
-          originalCompletionText: (toolUse as any).originalText || '',
-        }
-
-        const toolStartTime = Date.now()
-        const result = await this.toolSystem.executeTool(toolCall)
-        const toolDurationMs = Date.now() - toolStartTime
-
-        // Persist tool use (legacy - keep for backwards compatibility during migration)
-        await this.toolSystem.persistToolUse(
-          this.botId,
-          channelId,
-          toolCall,
-          result
-        )
-
-        toolResults.push({ call: toolCall, result: result.output })
-        allToolCallIds.push(toolCall.id)
-        
-        // Record tool execution to trace
-        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
-        traceToolExecution({
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          input: toolCall.input,
-          output: outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr,
-          outputTruncated: outputStr.length > 1000,
-          fullOutputLength: outputStr.length,
-          durationMs: toolDurationMs,
-          sentToDiscord: config.tool_output_visible,
-          error: result.error ? String(result.error) : undefined,
-        })
-
-        // Send tool output to Discord if visible (with period prefix to hide from bots)
-        if (config.tool_output_visible) {
-          // Format input (compact)
-          const inputStr = JSON.stringify(toolCall.input)
-          
-          // Format output: remove newlines, trim if large, show length
-          const rawOutput = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
-          const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
-          const maxLen = 200
-          const trimmedOutput = flatOutput.length > maxLen 
-            ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
-            : flatOutput
-          
-          const toolMessage = `.${config.name}>[${toolCall.name}]: ${inputStr}\n.${config.name}<[${toolCall.name}]: ${trimmedOutput}`
-          await this.connector.sendWebhook(channelId, toolMessage, config.name)
-        }
-      }
-
-      allToolResults.push(...toolResults)
-
-      // Add bot's completion (with XML tool call intact)
-      const completionText = completion.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
-        .join('\n')
-      
-      // Bot's participant name in LLM context is always config.name
-      currentRequest.messages.push({
-        participant: config.name,
-        content: [{ type: 'text', text: completionText }],
-      })
-
-      // Add tool result messages from System
-      const toolResultMessages = this.contextBuilder.formatToolResults(toolResults)
-      currentRequest.messages.push(...toolResultMessages)
-
-      // Add empty message for next completion
-      currentRequest.messages.push({
-        participant: config.name,
-        content: [{ type: 'text', text: '' }],
-      })
-
-      depth++
-    }
-
-    logger.warn('Reached max tool depth')
-    return { 
-      completion: {
-      content: [{ type: 'text', text: '[Max tool depth reached]' }], 
-      stopReason: 'end_turn' as const,
-      usage: { inputTokens: 0, outputTokens: 0 }, 
-      model: '' 
-      },
-      toolCallIds: allToolCallIds,
-      preambleMessageIds: allPreambleMessageIds
-    }
-  }
-
   /**
    * Check if thinking was actually prefilled in the request.
-   * In continuation mode (m continue), the previous message is from the same bot and has content,
-   * so thinking is NOT prefilled - the middleware will merge them.
+   * This must mirror the middleware's logic for determining continuation mode.
    * 
-   * Context builder always adds an empty completion message at the end, so we need to check
-   * the second-to-last message to detect continuation mode.
+   * The middleware considers it a continuation if:
+   *   lastNonEmptyParticipant === botName || (prevIsBotMessage && !prevHasToolResult)
+   * 
+   * If it's a continuation, thinking is NOT prefilled.
    */
   private wasThinkingPrefilled(request: any, config: BotConfig): boolean {
     // If prefill_thinking is disabled, thinking was never prefilled
@@ -1932,7 +1814,6 @@ export class AgentLoop {
       return false
     }
     
-    // Check the messages in the request
     const messages = request.messages || []
     if (messages.length === 0) {
       return false
@@ -1946,7 +1827,7 @@ export class AgentLoop {
       return false
     }
     
-    // Check if last message has content (would be unusual but handle it)
+    // Check if last message has content
     const lastContent = lastMsg.content || []
     const lastHasContent = lastContent.some((c: any) => {
       if (c.type === 'text') {
@@ -1955,36 +1836,48 @@ export class AgentLoop {
       return false
     })
     
+    const lastHasToolResult = lastContent.some((c: any) => c.type === 'tool_result')
+    
     if (lastHasContent) {
-      // Last message already has content - this shouldn't happen normally
-      // but if it does, thinking wasn't prefilled into an empty message
+      // Last message already has content - thinking wasn't prefilled
       return false
     }
     
-    // Last message is empty (the completion placeholder).
-    // Check if the previous message is also from the bot and has content.
-    // If so, this is continuation mode (m continue) and thinking was NOT prefilled.
-    if (messages.length >= 2) {
-      const prevMsg = messages[messages.length - 2]
-      if (prevMsg.participant === botName) {
-        const prevContent = prevMsg.content || []
-        const prevHasContent = prevContent.some((c: any) => {
-          if (c.type === 'text') {
-            return c.text && c.text.trim().length > 0
-          }
-          return false
-        })
-        if (prevHasContent) {
-          // Previous message is from bot with content - this is continuation mode
-          // Thinking was NOT prefilled (middleware will continue from prev content)
-          return false
-        }
+    // Last message is empty (completion placeholder).
+    // Mirror the middleware's continuation logic:
+    // isContinuation = isBotMessage && !hasToolResult && (lastNonEmptyParticipant === botName || (prevIsBotMessage && !prevHasToolResult))
+    
+    // Track lastNonEmptyParticipant like the middleware does
+    let lastNonEmptyParticipant: string | null = null
+    for (let i = 0; i < messages.length - 1; i++) {  // Exclude the last (empty) message
+      const msg = messages[i]
+      const content = msg.content || []
+      const hasContent = content.some((c: any) => {
+        if (c.type === 'text') return c.text && c.text.trim().length > 0
+        return false
+      })
+      const hasToolResult = content.some((c: any) => c.type === 'tool_result')
+      
+      if (hasContent && !hasToolResult) {
+        lastNonEmptyParticipant = msg.participant
       }
     }
     
-    // Normal case: empty last message, previous is from another participant
-    // Thinking was prefilled
-    return true
+    // Check previous message
+    const prevMsg = messages.length >= 2 ? messages[messages.length - 2] : null
+    const prevIsBotMessage = prevMsg && prevMsg.participant === botName
+    const prevContent = prevMsg?.content || []
+    const prevHasToolResult = prevContent.some((c: any) => c.type === 'tool_result')
+    
+    // Continuation if: lastNonEmptyParticipant was the bot OR prev message is from bot without tool result
+    const isContinuation = !lastHasToolResult && (
+      lastNonEmptyParticipant === botName ||
+      (prevIsBotMessage && !prevHasToolResult)
+    )
+    
+    // If it's a continuation, thinking was NOT prefilled
+    // If it's NOT a continuation, thinking WAS prefilled
+    return !isContinuation
   }
 
   /**

@@ -13,7 +13,8 @@ import {
   StoredActivation, 
   Completion, 
   ToolCall,
-  ToolResult 
+  ToolResult,
+  MessageContext 
 } from './types.js'
 
 export class ActivationStore {
@@ -118,24 +119,47 @@ export class ActivationStore {
   }
   
   /**
-   * Set the LLM-visible context chunk for a specific message
-   * Used for progressive display with inline tool execution
+   * Set the invisible context (prefix/suffix) for a specific message
+   * prefix: invisible content before this message's visible text
+   * suffix: invisible content after (typically only for last message)
    */
-  setMessageContext(activationId: string, messageId: string, contextChunk: string): void {
+  setMessageContext(activationId: string, messageId: string, context: MessageContext): void {
     const activation = this.activeActivations.get(activationId)
     if (!activation) {
       logger.warn({ activationId, messageId }, 'Tried to set message context for unknown activation')
       return
     }
     
-    activation.messageContexts[messageId] = contextChunk
+    activation.messageContexts[messageId] = context
     
     logger.debug({
       activationId,
       messageId,
-      contextLength: contextChunk.length,
-      hasToolXml: contextChunk.includes('function_calls'),
-    }, 'Set message context chunk')
+      prefixLength: context.prefix.length,
+      suffixLength: context.suffix?.length ?? 0,
+      hasToolXml: context.prefix.includes('function_calls') || (context.suffix?.includes('function_calls') ?? false),
+    }, 'Set message context')
+  }
+  
+  /**
+   * Set message contexts for multiple messages atomically
+   * Used by sendWithContext to record all chunk contexts at once
+   */
+  setMessageContexts(activationId: string, contexts: Record<string, MessageContext>): void {
+    const activation = this.activeActivations.get(activationId)
+    if (!activation) {
+      logger.warn({ activationId }, 'Tried to set message contexts for unknown activation')
+      return
+    }
+    
+    for (const [messageId, context] of Object.entries(contexts)) {
+      activation.messageContexts[messageId] = context
+    }
+    
+    logger.debug({
+      activationId,
+      messageCount: Object.keys(contexts).length,
+    }, 'Set multiple message contexts')
   }
   
   
@@ -209,9 +233,22 @@ export class ActivationStore {
         // If bot messages still exist, we want to inject thinking into them.
         // The anchor is only used for phantom placement, which will fall back gracefully.
         
+        // Handle legacy messageContexts format (string -> MessageContext)
+        const messageContexts: Record<string, MessageContext> = {}
+        if (stored.messageContexts) {
+          for (const [msgId, ctx] of Object.entries(stored.messageContexts)) {
+            if (typeof ctx === 'string') {
+              // Legacy format: full context string -> treat as prefix
+              messageContexts[msgId] = { prefix: ctx }
+            } else {
+              messageContexts[msgId] = ctx as MessageContext
+            }
+          }
+        }
+        
         activations.push({
           ...stored,
-          messageContexts: stored.messageContexts || {},  // Handle older activations without messageContexts
+          messageContexts,
           startedAt: new Date(stored.startedAt),
           endedAt: stored.endedAt ? new Date(stored.endedAt) : undefined,
         })
@@ -248,15 +285,21 @@ export class ActivationStore {
   }
   
   /**
-   * Build a unified map of messageId -> context chunk from all activations
-   * Each message gets its own LLM-visible context for reconstruction
+   * Build a unified map of messageId -> context from all activations
+   * Each message gets its own prefix/suffix for reconstruction
+   * Handles legacy format (string) by converting to { prefix: string }
    */
-  buildMessageContextMap(activations: Activation[]): Map<string, string> {
-    const map = new Map<string, string>()
+  buildMessageContextMap(activations: Activation[]): Map<string, MessageContext> {
+    const map = new Map<string, MessageContext>()
     
     for (const activation of activations) {
-      for (const [messageId, contextChunk] of Object.entries(activation.messageContexts)) {
-        map.set(messageId, contextChunk)
+      for (const [messageId, context] of Object.entries(activation.messageContexts)) {
+        // Handle legacy format: string -> { prefix: string }
+        if (typeof context === 'string') {
+          map.set(messageId, { prefix: context })
+        } else {
+          map.set(messageId, context)
+        }
       }
     }
     
