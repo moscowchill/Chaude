@@ -1732,13 +1732,37 @@ export class AgentLoop {
       }
     }
     
-    // 9. Calculate full display text for trace
-    let displayText = this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput)).stripped
+    // 9. Calculate full display text for trace and extract thinking content
+    const { stripped, content: thinkingContent } = this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput))
+    let displayText = stripped
     if (discordMessages) {
       displayText = await this.replaceMentions(displayText, discordMessages)
     }
     
-    // 9. Build final completion text for trace
+    // 10. Post thinking content as debug messages if debug_thinking is enabled
+    if (config.debug_thinking && thinkingContent.length > 0) {
+      for (const thinking of thinkingContent) {
+        if (thinking.trim()) {
+          try {
+            // If thinking is short enough, post as dot-prefixed message
+            // Otherwise, post as text file attachment
+            if (thinking.length <= 1900) {
+              await this.connector.sendMessage(channelId, `.💭 ${thinking}`)
+            } else {
+              await this.connector.sendMessageWithAttachment(
+                channelId,
+                '.💭 thinking trace attached',
+                { name: 'thinking.md', content: thinking }
+              )
+            }
+          } catch (err) {
+            logger.warn({ err }, 'Failed to send debug thinking message')
+          }
+        }
+      }
+    }
+    
+    // 11. Build final completion text for trace
     const fullCompletionText = accumulatedOutput + suffixText
     
     return {
