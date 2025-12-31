@@ -571,11 +571,25 @@ export class DiscordConnector {
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
+                hadPendingNewerMessages: !!(this as any)._pendingNewerMessages,
               }, 'Empty .history command - keeping newer messages, discarding older')
               this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
               
-              // Clear only batchResults (older messages in current batch)
-              // Keep results (newer batches already collected)
+              // If we previously processed a .history range in this batch, the historical
+              // messages it fetched are now in `results`. Since this .history clear is
+              // NEWER than that range, we need to discard those historical messages too.
+              if ((this as any)._pendingNewerMessages) {
+                // _pendingNewerMessages has the ACTUAL newer messages we want to keep
+                // results has historical messages that should be discarded
+                results.length = 0
+                results.push(...(this as any)._pendingNewerMessages)
+                delete (this as any)._pendingNewerMessages
+                logger.debug({
+                  restoredCount: results.length,
+                }, 'Restored newer messages after .history clear overrode earlier .history range')
+              }
+              
+              // Clear batchResults (older messages in current batch)
               batchResults.length = 0
               foundHistory = true
               
