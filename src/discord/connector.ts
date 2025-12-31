@@ -641,10 +641,11 @@ export class DiscordConnector {
                 foundHistory = true
                 
                 // IMPORTANT: Save messages that are NEWER than this .history range:
-                // 1. results = messages from earlier (newer) batches
-                // 2. batchResults = messages in current batch AFTER the last .history clear
-                //    (these are between the last .history clear and this .history range)
-                const newerMessages = [...results, ...batchResults]
+                // Only results (from earlier/newer batches) - NOT batchResults!
+                // batchResults contains messages BETWEEN the last .history clear and .history range,
+                // which are OLDER than the .history range and should be discarded if a later
+                // .history clear overrides this range.
+                const newerMessages = [...results]
                 
                 // Reset results with historical messages (oldest)
                 results.length = 0
