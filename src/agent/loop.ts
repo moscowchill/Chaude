@@ -1555,6 +1555,7 @@ export class AgentLoop {
                 serverId: guildId,
                 botId: this.botUserId || '',
                 triggerUserId,
+                triggerMessageId: triggeringMessageId,
               })
             } catch (trackError) {
               logger.warn({ trackError, messageId }, 'Failed to track message for Soma')

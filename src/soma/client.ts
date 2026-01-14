@@ -217,6 +217,7 @@ export class SomaClient {
           serverId: params.serverId,
           botId: params.botId,
           triggerUserId: params.triggerUserId,
+          ...(params.triggerMessageId && { triggerMessageId: params.triggerMessageId }),
         }),
       })
 
@@ -307,11 +308,12 @@ export interface SomaRefundResult {
 }
 
 export interface SomaTrackMessageParams {
-  messageId: string      // Discord message ID (bot's response)
-  channelId: string      // Discord channel ID
-  serverId: string       // Discord guild ID
-  botId: string          // Bot's Discord ID
-  triggerUserId: string  // Discord user ID who triggered the bot
+  messageId: string         // Discord message ID (bot's response)
+  channelId: string         // Discord channel ID
+  serverId: string          // Discord guild ID
+  botId: string             // Bot's Discord ID
+  triggerUserId: string     // Discord user ID who triggered the bot
+  triggerMessageId?: string // Discord message ID of user's triggering message (for rewards on the ping)
 }
 
 export interface SomaTrackMessageResult {
