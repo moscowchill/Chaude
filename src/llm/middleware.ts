@@ -115,8 +115,10 @@ export class LLMMiddleware {
     // Bot's participant name in LLM context is always config.botName
     // (context builder normalizes bot's Discord messages to use this name)
     const botName = request.config.botName
-    const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models
-    // If using delimiter, don't add newlines between messages - delimiter provides separation
+    const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models (removes newlines)
+    const turnEndToken = request.config.turnEndToken || ''  // e.g., '<eot>' for Gemini (preserves newlines)
+    // If using delimiter (base model), don't add newlines - delimiter provides separation
+    // If using turnEndToken, keep newlines - token is just appended to content
     const joiner = delimiter ? '' : '\n'
     let lastNonEmptyParticipant: string | null = null
     
@@ -260,8 +262,11 @@ export class LLMMiddleware {
           currentConversation.push({ text: `${msg.participant}:` })
         }
       } else if (formatted.text) {
-        // Regular message - append delimiter if configured (for base model completions)
-        currentConversation.push({ text: `${msg.participant}: ${formatted.text}${delimiter}` })
+        // Regular message - append delimiter/turnEndToken if configured
+        // delimiter: for base models (e.g., '</s>') - removes newlines between messages
+        // turnEndToken: for models like Gemini (e.g., '<eot>') - preserves newlines
+        const suffix = delimiter || turnEndToken
+        currentConversation.push({ text: `${msg.participant}: ${formatted.text}${suffix}` })
         if (!hasToolResult) {
           lastNonEmptyParticipant = msg.participant
         }
@@ -271,9 +276,13 @@ export class LLMMiddleware {
     // Flush any remaining conversation, insert tools near end
     // Note: By this point, we've already passed the cache marker (if any),
     // so all remaining content is uncached
+    
+    // Add tools if we have them - regardless of conversation length
+    const hasTools = request.tools && request.tools.length > 0
+    
     if (currentConversation.length > 0) {
-      if (request.tools && request.tools.length > 0 && currentConversation.length > 10) {
-        // Insert tools ~10 messages from the end
+      if (hasTools && currentConversation.length > 10) {
+        // Long remaining buffer - insert tools ~10 messages from the end
         const splitPoint = currentConversation.length - 10
         const beforeTools = currentConversation.slice(0, splitPoint)
         const afterTools = currentConversation.slice(splitPoint)
@@ -299,13 +308,29 @@ export class LLMMiddleware {
             content: afterTools.map(e => e.text).join(joiner),
           })
         }
+      } else if (hasTools) {
+        // Short remaining buffer but we have tools - add tools first, then conversation
+        messages.push({
+          role: 'user',
+          content: this.formatToolsForPrefill(request.tools),
+        })
+        messages.push({
+          role: 'assistant',
+          content: currentConversation.map(e => e.text).join(joiner),
+        })
       } else {
-        // Short conversation - just add everything (no cache_control - we're past marker or none exists)
+        // No tools - just add conversation
         messages.push({
           role: 'assistant',
           content: currentConversation.map(e => e.text).join(joiner),
         })
       }
+    } else if (hasTools) {
+      // No remaining conversation but we have tools - still need to add them
+      messages.push({
+        role: 'user',
+        content: this.formatToolsForPrefill(request.tools),
+      })
     }
 
     // Anthropic API rejects assistant prefill ending with trailing whitespace

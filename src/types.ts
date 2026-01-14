@@ -132,7 +132,8 @@ export interface ModelConfig {
   chatPersonaPrompt?: boolean  // If true, add persona instruction system prompt for chat mode
   chatPersonaPrefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
   chatBotAsAssistant?: boolean  // If true (default), bot's own messages are sent as assistant role; if false, merged into user turns
-  messageDelimiter?: string  // Optional delimiter appended to each message (for base model completions)
+  messageDelimiter?: string  // Optional delimiter appended to each message (for base model completions, removes newlines)
+  turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini, preserves newlines)
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
@@ -178,13 +179,15 @@ export interface BotConfig {
   tools_enabled: boolean
   tool_output_visible: boolean
   max_tool_depth: number
+  max_mcp_images: number  // Max images from MCP tool results to include in context
   mcp_servers?: MCPServerConfig[]
   tool_plugins?: string[]  // Plugin names to enable (e.g., ['config'])
   plugin_config?: Record<string, PluginInstanceConfig>  // Per-plugin configuration
   
   // Stop sequences
   stop_sequences: string[]
-  message_delimiter?: string  // Delimiter appended to each message in prefill mode (e.g., '</s>' for base models)
+  message_delimiter?: string  // Delimiter appended to each message in prefill mode (e.g., '</s>' for base models, removes newlines)
+  turn_end_token?: string  // Token appended after each message content (e.g., '<eot>' for Gemini, preserves newlines)
   
   // Chat mode persona
   chat_persona_prompt?: boolean  // If true, add persona instruction system prompt for chat mode
@@ -305,6 +308,11 @@ export interface ToolCallWithResult {
 export interface ToolResult {
   callId: string
   output: any
+  /** Image content blocks returned from MCP tools (base64 encoded) */
+  images?: Array<{
+    data: string      // base64 encoded image data
+    mimeType: string  // e.g., 'image/png', 'image/jpeg'
+  }>
   error?: string
   timestamp: Date
 }
