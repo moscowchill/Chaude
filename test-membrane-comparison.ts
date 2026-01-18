@@ -512,7 +512,7 @@ async function main() {
   const middleware = new LLMMiddleware();
   middleware.registerProvider(new AnthropicProvider(apiKey), 'anthropic');
   middleware.setVendorConfigs({
-    anthropic: { patterns: ['claude-*'], config: {} },
+    anthropic: { provides: ['claude-.*'], config: {} },
   });
   
   // Set up membrane
