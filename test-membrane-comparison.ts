@@ -240,7 +240,15 @@ async function runCachingValidation(
   console.log('║         Prompt Caching Validation Test                         ║');
   console.log('╚════════════════════════════════════════════════════════════════╝\n');
   
-  // Build a large enough context to trigger caching (>1024 tokens typically)
+  // Build a large enough context to trigger caching
+  // Anthropic requires minimum 1024 tokens for Haiku, 2048 for Sonnet/Opus
+  // Each filler line is ~20 tokens, so 60 lines = ~1200 tokens
+  const fillerParagraphs = Array(60).fill(
+    'This is detailed filler content to ensure the system prompt exceeds the minimum token threshold for prompt caching. ' +
+    'The Anthropic API requires at least 1024 tokens for Claude 3.5 Haiku to enable cache_control markers. ' +
+    'Without sufficient tokens, the cache markers are silently ignored and no caching occurs. '
+  ).join('\n\n');
+  
   const longSystemPrompt = `You are an expert assistant helping with software development.
 You have extensive knowledge of TypeScript, JavaScript, Python, and many other programming languages.
 You are particularly skilled at explaining complex technical concepts in simple terms.
@@ -249,8 +257,11 @@ You always consider edge cases and potential errors in your explanations.
 Your responses are thorough but concise, avoiding unnecessary verbosity.
 You respect best practices and modern development patterns.
 
-Here is some additional context about the project:
-${Array(20).fill('This is filler content to ensure the system prompt is long enough to benefit from caching. ').join('')}
+=== PROJECT DOCUMENTATION ===
+
+${fillerParagraphs}
+
+=== END DOCUMENTATION ===
 
 Remember: Always be helpful, accurate, and respectful.`;
 
