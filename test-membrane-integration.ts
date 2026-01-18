@@ -61,7 +61,7 @@ const TEST_CASES: TestCase[] = [
     request: {
       messages: [
         { participant: 'User', content: [{ type: 'text', text: 'Say "Hello World" and nothing else.' }] },
-        { participant: 'Claude', content: [] },
+        { participant: 'Claude', content: [{ type: 'text', text: '' }] },
       ],
       system_prompt: 'You are a helpful assistant. Follow instructions exactly.',
       config: {
@@ -95,7 +95,7 @@ const TEST_CASES: TestCase[] = [
         { participant: 'Claude', content: [{ type: 'text', text: 'Of course, Alice! What is your math problem?' }] },
         { participant: 'Bob', content: [{ type: 'text', text: 'I can help too! What is the problem?' }] },
         { participant: 'Alice', content: [{ type: 'text', text: 'What is 2+2?' }] },
-        { participant: 'Claude', content: [] },
+        { participant: 'Claude', content: [{ type: 'text', text: '' }] },
       ],
       system_prompt: 'You are a helpful assistant. Be concise.',
       config: {
@@ -127,7 +127,7 @@ const TEST_CASES: TestCase[] = [
     request: {
       messages: [
         { participant: 'User', content: [{ type: 'text', text: 'Write a conversation between two people named Alice and Bob.' }] },
-        { participant: 'Claude', content: [] },
+        { participant: 'Claude', content: [{ type: 'text', text: '' }] },
       ],
       system_prompt: 'You are a creative writer.',
       config: {
@@ -156,7 +156,7 @@ const TEST_CASES: TestCase[] = [
     request: {
       messages: [
         { participant: 'User', content: [{ type: 'text', text: 'What is the weather in New York? Use the get_weather tool.' }] },
-        { participant: 'Claude', content: [] },
+        { participant: 'Claude', content: [{ type: 'text', text: '' }] },
       ],
       system_prompt: 'You are a helpful assistant with access to tools. Always use tools when asked.',
       config: {
@@ -211,7 +211,7 @@ const TEST_CASES: TestCase[] = [
         },
         { participant: 'Claude', content: [{ type: 'text', text: 'I understand.' }] },
         { participant: 'User', content: [{ type: 'text', text: 'What did I say should be cached?' }] },
-        { participant: 'Claude', content: [] },
+        { participant: 'Claude', content: [{ type: 'text', text: '' }] },
       ],
       system_prompt: 'You are a helpful assistant with good memory.',
       config: {
@@ -303,21 +303,21 @@ async function runTestWithMiddleware(testCase: TestCase): Promise<TestResult> {
     
     // Register providers based on available keys
     if (process.env.ANTHROPIC_API_KEY) {
-      middleware.registerProvider(new AnthropicProvider());
+      middleware.registerProvider(new AnthropicProvider(process.env.ANTHROPIC_API_KEY), 'anthropic');
       middleware.setVendorConfigs({
         anthropic: {
-          pattern: '^claude-',
-          config: { anthropic_api_key: process.env.ANTHROPIC_API_KEY },
+          provides: ['claude-.*'],
+          config: {},
         },
       });
     }
     
     if (process.env.OPENROUTER_API_KEY) {
-      middleware.registerProvider(new OpenRouterProvider());
+      middleware.registerProvider(new OpenRouterProvider(process.env.OPENROUTER_API_KEY), 'openrouter');
       middleware.setVendorConfigs({
         openrouter: {
-          pattern: '/',
-          config: { openrouter_api_key: process.env.OPENROUTER_API_KEY },
+          provides: ['.*\\/.*'],  // Models with provider prefix like anthropic/claude-*
+          config: {},
         },
       });
     }

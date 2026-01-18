@@ -305,7 +305,8 @@ async function main() {
     anthropicApiKey: apiKey,
     assistantName: BOT_NAME,
   });
-  const membraneProvider = new MembraneProvider(membrane, BOT_NAME);
+  // Cast to any to work around local vs package type mismatch (runtime is correct)
+  const membraneProvider = new MembraneProvider(membrane as any, BOT_NAME);
   
   // Default system prompt (you might want to load from config)
   const systemPrompt = process.env.SYSTEM_PROMPT || 

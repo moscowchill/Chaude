@@ -315,7 +315,8 @@ Remember: Always be helpful, accurate, and respectful.`;
     cachingWorking: false,
     cacheHitRate: 0,
   };
-  oldResult.cachingWorking = oldResult.call1.cacheCreation > 0 && oldResult.call2.cacheRead > 0;
+  // Caching is working if: created on call1 and read on call2, OR already reading from cache
+  oldResult.cachingWorking = (oldResult.call1.cacheCreation > 0 || oldResult.call1.cacheRead > 0) && oldResult.call2.cacheRead > 0;
   oldResult.cacheHitRate = oldResult.call2.cacheRead / Math.max(oldResult.call2.inputTokens + oldResult.call2.cacheRead, 1);
 
   console.log(`  [OLD] Call 1: created=${oldResult.call1.cacheCreation}, read=${oldResult.call1.cacheRead}`);
@@ -343,7 +344,8 @@ Remember: Always be helpful, accurate, and respectful.`;
     cachingWorking: false,
     cacheHitRate: 0,
   };
-  membraneResult.cachingWorking = membraneResult.call1.cacheCreation > 0 && membraneResult.call2.cacheRead > 0;
+  // Caching is working if: created on call1 and read on call2, OR already reading from cache
+  membraneResult.cachingWorking = (membraneResult.call1.cacheCreation > 0 || membraneResult.call1.cacheRead > 0) && membraneResult.call2.cacheRead > 0;
   membraneResult.cacheHitRate = membraneResult.call2.cacheRead / Math.max(membraneResult.call2.inputTokens + membraneResult.call2.cacheRead, 1);
 
   console.log(`  [NEW] Call 1: created=${membraneResult.call1.cacheCreation}, read=${membraneResult.call1.cacheRead}`);
