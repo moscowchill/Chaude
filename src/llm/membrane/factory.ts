@@ -125,7 +125,7 @@ let openaiCompatibleRoutes: OpenAICompatibleRouting[] = [];
  * 
  * Routing rules:
  * - claude-* → Anthropic (direct API is preferred for Claude)
- * - gpt-*, o1-*, o3-*, o4-* → OpenAI (direct API)
+ * - gpt-*, o1*, o3*, o4* → OpenAI (direct API, includes bare o1/o3/o4)
  * - provider/model → OpenRouter (any model with provider prefix, e.g. anthropic/claude-3-opus)
  * - local:* or openai-compatible:* → Check pattern matches against registered OpenAI-compatible providers
  * - Everything else → Anthropic as fallback, then OpenRouter, then OpenAI
@@ -175,10 +175,11 @@ function getAdapterForModel(modelName: string, adapters: Map<string, ProviderAda
   }
   
   // OpenAI models go to OpenAI
+  // Note: o1/o3/o4 patterns match both bare names (o3) and variants (o3-mini)
   if (modelName.startsWith('gpt-') || 
-      modelName.startsWith('o1-') || 
-      modelName.startsWith('o3-') || 
-      modelName.startsWith('o4-') ||
+      modelName.startsWith('o1') ||   // o1, o1-mini, o1-preview
+      modelName.startsWith('o3') ||   // o3, o3-mini, o3-mini-high
+      modelName.startsWith('o4') ||   // o4, o4-mini
       modelName.startsWith('gpt5') ||
       modelName.startsWith('chatgpt-')) {
     return adapters.get('openai');
