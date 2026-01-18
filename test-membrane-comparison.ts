@@ -213,6 +213,154 @@ const TEST_CASES: TestCase[] = [
 ];
 
 // ============================================================================
+// Caching Validation Test (Separate flow - requires 2 calls)
+// ============================================================================
+
+interface CachingTestResult {
+  pathway: 'old' | 'membrane';
+  call1: {
+    cacheCreation: number;
+    cacheRead: number;
+    inputTokens: number;
+  };
+  call2: {
+    cacheCreation: number;
+    cacheRead: number;
+    inputTokens: number;
+  };
+  cachingWorking: boolean;
+  cacheHitRate: number;
+}
+
+async function runCachingValidation(
+  middleware: LLMMiddleware,
+  membraneProvider: MembraneProvider
+): Promise<{ old: CachingTestResult; membrane: CachingTestResult }> {
+  console.log('\n╔════════════════════════════════════════════════════════════════╗');
+  console.log('║         Prompt Caching Validation Test                         ║');
+  console.log('╚════════════════════════════════════════════════════════════════╝\n');
+  
+  // Build a large enough context to trigger caching (>1024 tokens typically)
+  const longSystemPrompt = `You are an expert assistant helping with software development.
+You have extensive knowledge of TypeScript, JavaScript, Python, and many other programming languages.
+You are particularly skilled at explaining complex technical concepts in simple terms.
+When asked about code, you provide clear, well-commented examples.
+You always consider edge cases and potential errors in your explanations.
+Your responses are thorough but concise, avoiding unnecessary verbosity.
+You respect best practices and modern development patterns.
+
+Here is some additional context about the project:
+${Array(20).fill('This is filler content to ensure the system prompt is long enough to benefit from caching. ').join('')}
+
+Remember: Always be helpful, accurate, and respectful.`;
+
+  const cachingRequest: LLMRequest = {
+    messages: [
+      msg('User', 'What is TypeScript and why should I use it?'),
+      msg(BOT_NAME, ''),
+    ],
+    system_prompt: longSystemPrompt,
+    config: {
+      model: MODEL,
+      temperature: 0,
+      max_tokens: 100,
+      top_p: 1,
+      mode: 'prefill',
+      botName: BOT_NAME,
+      prompt_caching: true,
+    },
+  };
+
+  // Follow-up request (should hit cache)
+  const followUpRequest: LLMRequest = {
+    ...cachingRequest,
+    messages: [
+      msg('User', 'What is TypeScript and why should I use it?'),
+      msg(BOT_NAME, 'TypeScript is a typed superset of JavaScript that compiles to plain JavaScript.'),
+      msg('User', 'Tell me more about type safety.'),
+      msg(BOT_NAME, ''),
+    ],
+  };
+
+  // Test OLD middleware
+  console.log('[CACHE TEST] Testing old middleware caching...');
+  const old1 = await middleware.complete(cachingRequest);
+  // Small delay to ensure cache is written
+  await new Promise(r => setTimeout(r, 500));
+  const old2 = await middleware.complete(followUpRequest);
+  
+  const oldResult: CachingTestResult = {
+    pathway: 'old',
+    call1: {
+      cacheCreation: old1.usage?.cacheCreationInputTokens || 0,
+      cacheRead: old1.usage?.cacheReadInputTokens || 0,
+      inputTokens: old1.usage?.inputTokens || 0,
+    },
+    call2: {
+      cacheCreation: old2.usage?.cacheCreationInputTokens || 0,
+      cacheRead: old2.usage?.cacheReadInputTokens || 0,
+      inputTokens: old2.usage?.inputTokens || 0,
+    },
+    cachingWorking: false,
+    cacheHitRate: 0,
+  };
+  oldResult.cachingWorking = oldResult.call1.cacheCreation > 0 && oldResult.call2.cacheRead > 0;
+  oldResult.cacheHitRate = oldResult.call2.cacheRead / Math.max(oldResult.call2.inputTokens + oldResult.call2.cacheRead, 1);
+
+  console.log(`  [OLD] Call 1: created=${oldResult.call1.cacheCreation}, read=${oldResult.call1.cacheRead}`);
+  console.log(`  [OLD] Call 2: created=${oldResult.call2.cacheCreation}, read=${oldResult.call2.cacheRead}`);
+  console.log(`  [OLD] Cache working: ${oldResult.cachingWorking ? '✅ YES' : '❌ NO'} (hit rate: ${(oldResult.cacheHitRate * 100).toFixed(1)}%)`);
+
+  // Test MEMBRANE
+  console.log('\n[CACHE TEST] Testing membrane caching...');
+  const new1 = await membraneProvider.completeFromLLMRequest(cachingRequest);
+  await new Promise(r => setTimeout(r, 500));
+  const new2 = await membraneProvider.completeFromLLMRequest(followUpRequest);
+  
+  const membraneResult: CachingTestResult = {
+    pathway: 'membrane',
+    call1: {
+      cacheCreation: new1.usage?.cacheCreationInputTokens || 0,
+      cacheRead: new1.usage?.cacheReadInputTokens || 0,
+      inputTokens: new1.usage?.inputTokens || 0,
+    },
+    call2: {
+      cacheCreation: new2.usage?.cacheCreationInputTokens || 0,
+      cacheRead: new2.usage?.cacheReadInputTokens || 0,
+      inputTokens: new2.usage?.inputTokens || 0,
+    },
+    cachingWorking: false,
+    cacheHitRate: 0,
+  };
+  membraneResult.cachingWorking = membraneResult.call1.cacheCreation > 0 && membraneResult.call2.cacheRead > 0;
+  membraneResult.cacheHitRate = membraneResult.call2.cacheRead / Math.max(membraneResult.call2.inputTokens + membraneResult.call2.cacheRead, 1);
+
+  console.log(`  [NEW] Call 1: created=${membraneResult.call1.cacheCreation}, read=${membraneResult.call1.cacheRead}`);
+  console.log(`  [NEW] Call 2: created=${membraneResult.call2.cacheCreation}, read=${membraneResult.call2.cacheRead}`);
+  console.log(`  [NEW] Cache working: ${membraneResult.cachingWorking ? '✅ YES' : '❌ NO'} (hit rate: ${(membraneResult.cacheHitRate * 100).toFixed(1)}%)`);
+
+  // Compare
+  console.log('\n[CACHE COMPARISON]');
+  if (oldResult.cachingWorking && membraneResult.cachingWorking) {
+    console.log('  ✅ Both pathways have working prompt caching');
+    const hitDiff = Math.abs(oldResult.cacheHitRate - membraneResult.cacheHitRate);
+    if (hitDiff < 0.1) {
+      console.log(`  ✅ Cache hit rates are comparable (diff: ${(hitDiff * 100).toFixed(1)}%)`);
+    } else {
+      console.log(`  ⚠️  Cache hit rate difference: ${(hitDiff * 100).toFixed(1)}% (OLD=${(oldResult.cacheHitRate*100).toFixed(1)}%, NEW=${(membraneResult.cacheHitRate*100).toFixed(1)}%)`);
+    }
+  } else if (!oldResult.cachingWorking && !membraneResult.cachingWorking) {
+    console.log('  ⚠️  Neither pathway showed caching (may need longer context or model may not support it)');
+  } else if (membraneResult.cachingWorking && !oldResult.cachingWorking) {
+    console.log('  🎉 Membrane has BETTER caching than old middleware!');
+  } else {
+    console.log('  ❌ Old middleware has caching but membrane does NOT - this is a regression!');
+  }
+
+  return { old: oldResult, membrane: membraneResult };
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -248,16 +396,23 @@ interface ComparisonResult {
   oldResult: {
     text: string;
     stopReason: string;
-    tokens: { input: number; output: number };
+    tokens: { input: number; output: number; cacheRead?: number; cacheCreation?: number };
     duration: number;
   };
   newResult: {
     text: string;
     stopReason: string;
-    tokens: { input: number; output: number };
+    tokens: { input: number; output: number; cacheRead?: number; cacheCreation?: number };
     duration: number;
   };
   differences: string[];
+  cachingInfo?: {
+    oldCacheRead: number;
+    oldCacheCreation: number;
+    newCacheRead: number;
+    newCacheCreation: number;
+    cachingWorking: boolean;
+  };
 }
 
 function compareResults(
@@ -293,6 +448,12 @@ function compareResults(
     differences.push(`Token count variance ${(tokenVariance * 100).toFixed(1)}%: OLD=${oldTokens}, NEW=${newTokens}`);
   }
   
+  // Extract cache info
+  const oldCacheRead = oldResult.usage?.cacheReadInputTokens || 0;
+  const oldCacheCreation = oldResult.usage?.cacheCreationInputTokens || 0;
+  const newCacheRead = newResult.usage?.cacheReadInputTokens || 0;
+  const newCacheCreation = newResult.usage?.cacheCreationInputTokens || 0;
+  
   return {
     testName,
     passed: differences.length === 0,
@@ -302,6 +463,8 @@ function compareResults(
       tokens: {
         input: oldResult.usage?.inputTokens || 0,
         output: oldResult.usage?.outputTokens || 0,
+        cacheRead: oldCacheRead,
+        cacheCreation: oldCacheCreation,
       },
       duration: oldDuration,
     },
@@ -311,10 +474,19 @@ function compareResults(
       tokens: {
         input: newResult.usage?.inputTokens || 0,
         output: newResult.usage?.outputTokens || 0,
+        cacheRead: newCacheRead,
+        cacheCreation: newCacheCreation,
       },
       duration: newDuration,
     },
     differences,
+    cachingInfo: {
+      oldCacheRead,
+      oldCacheCreation,
+      newCacheRead,
+      newCacheCreation,
+      cachingWorking: (oldCacheRead > 0 || oldCacheCreation > 0) || (newCacheRead > 0 || newCacheCreation > 0),
+    },
   };
 }
 
@@ -425,19 +597,30 @@ async function main() {
     console.log();
   }
   
+  // Run caching validation (separate from comparison tests)
+  const skipCaching = process.argv.includes('--skip-caching');
+  let cachingResults: { old: CachingTestResult; membrane: CachingTestResult } | null = null;
+  
+  if (!skipCaching) {
+    try {
+      cachingResults = await runCachingValidation(middleware, membraneProvider);
+    } catch (error) {
+      console.log(`\n❌ Caching validation failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+  
   // Summary
-  console.log('═══════════════════════════════════════════════════════════════════');
+  console.log('\n═══════════════════════════════════════════════════════════════════');
   console.log('SUMMARY');
   console.log('═══════════════════════════════════════════════════════════════════');
   
   const passed = results.filter(r => r.passed).length;
   const failed = results.filter(r => !r.passed).length;
   
-  console.log(`Total: ${results.length} | Passed: ${passed} | Failed: ${failed}`);
-  console.log();
+  console.log(`\nComparison Tests: ${results.length} total | ${passed} passed | ${failed} failed`);
   
   if (failed > 0) {
-    console.log('Failed tests:');
+    console.log('\nFailed tests:');
     for (const result of results.filter(r => !r.passed)) {
       console.log(`  - ${result.testName}`);
       for (const diff of result.differences) {
@@ -449,15 +632,37 @@ async function main() {
   // Token usage summary
   const totalOldTokens = results.reduce((sum, r) => sum + r.oldResult.tokens.input + r.oldResult.tokens.output, 0);
   const totalNewTokens = results.reduce((sum, r) => sum + r.newResult.tokens.input + r.newResult.tokens.output, 0);
-  console.log();
-  console.log(`Total tokens: OLD=${totalOldTokens}, NEW=${totalNewTokens} (diff=${totalNewTokens - totalOldTokens})`);
+  console.log(`\nToken usage: OLD=${totalOldTokens}, NEW=${totalNewTokens} (diff=${totalNewTokens - totalOldTokens})`);
   
   // Duration summary
   const totalOldDuration = results.reduce((sum, r) => sum + r.oldResult.duration, 0);
   const totalNewDuration = results.reduce((sum, r) => sum + r.newResult.duration, 0);
-  console.log(`Total duration: OLD=${totalOldDuration}ms, NEW=${totalNewDuration}ms (diff=${totalNewDuration - totalOldDuration}ms)`);
+  console.log(`Duration: OLD=${totalOldDuration}ms, NEW=${totalNewDuration}ms (diff=${totalNewDuration - totalOldDuration}ms)`);
   
-  process.exit(failed > 0 ? 1 : 0);
+  // Caching summary
+  if (cachingResults) {
+    console.log('\n───────────────────────────────────────────────────────────────────');
+    console.log('CACHING VALIDATION');
+    console.log('───────────────────────────────────────────────────────────────────');
+    console.log(`Old middleware caching: ${cachingResults.old.cachingWorking ? '✅ Working' : '❌ Not working'}`);
+    console.log(`Membrane caching:       ${cachingResults.membrane.cachingWorking ? '✅ Working' : '❌ Not working'}`);
+    
+    if (cachingResults.old.cachingWorking && cachingResults.membrane.cachingWorking) {
+      console.log(`\nCache hit rates: OLD=${(cachingResults.old.cacheHitRate * 100).toFixed(1)}%, NEW=${(cachingResults.membrane.cacheHitRate * 100).toFixed(1)}%`);
+    }
+  }
+  
+  console.log('\n═══════════════════════════════════════════════════════════════════');
+  
+  // Determine exit code
+  let exitCode = 0;
+  if (failed > 0) exitCode = 1;
+  if (cachingResults && cachingResults.old.cachingWorking && !cachingResults.membrane.cachingWorking) {
+    console.log('⚠️  EXIT CODE 2: Caching regression detected');
+    exitCode = 2;
+  }
+  
+  process.exit(exitCode);
 }
 
 main().catch(console.error);
