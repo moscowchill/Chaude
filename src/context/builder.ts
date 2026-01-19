@@ -191,11 +191,68 @@ export class ContextBuilder {
     }
 
     // 6. Determine cache marker
-    const cacheMarker = this.determineCacheMarker(messages, lastCacheMarker, didTruncate, config.rolling_threshold)
+    let cacheMarker = this.determineCacheMarker(messages, lastCacheMarker, didTruncate, config.rolling_threshold)
 
     // Apply cache marker to appropriate message
+    // IMPORTANT: The marker was selected from raw messages, but some messages may have been
+    // merged or filtered during transformation to participantMessages. If the marker message
+    // no longer exists, we need to find a valid fallback.
     if (cacheMarker) {
-      const msgWithMarker = participantMessages.find((m) => m.messageId === cacheMarker)
+      let msgWithMarker = participantMessages.find((m) => m.messageId === cacheMarker)
+      
+      if (!msgWithMarker) {
+        // Marker message was merged/filtered - find a valid fallback
+        // IMPORTANT: Prefer non-bot messages as fallback since bot messages can get merged
+        // with adjacent bot messages in future calls, causing instability
+        const buffer = 20
+        const searchStart = Math.max(0, participantMessages.length - 1 - buffer)
+        const searchEnd = Math.max(0, participantMessages.length - 1 - buffer - 20) // Look back 20 more
+        
+        // First, try to find a non-bot message (user message) for stability
+        let fallbackMsg: typeof participantMessages[0] | undefined
+        let fallbackIndex = -1
+        
+        // Search backwards from buffer position, prefer user messages
+        for (let i = searchStart; i >= searchEnd && i >= 0; i--) {
+          const msg = participantMessages[i]
+          if (msg?.messageId) {
+            // Check if this is likely a user message (not the bot itself)
+            // Bot messages have participant === config.name, user messages don't
+            const isBotMsg = msg.participant === config.name
+            
+            if (!isBotMsg) {
+              // Found a user message - use it (stable, won't be merged)
+              fallbackMsg = msg
+              fallbackIndex = i
+              break
+            } else if (!fallbackMsg) {
+              // First bot message found - use as backup
+              fallbackMsg = msg
+              fallbackIndex = i
+            }
+          }
+        }
+        
+        if (fallbackMsg?.messageId) {
+          logger.warn({
+            originalMarker: cacheMarker,
+            fallbackMarker: fallbackMsg.messageId,
+            fallbackIndex,
+            fallbackParticipant: fallbackMsg.participant,
+            totalMessages: participantMessages.length,
+          }, 'Cache marker was orphaned (merged/filtered) - using fallback')
+          
+          cacheMarker = fallbackMsg.messageId
+          msgWithMarker = fallbackMsg
+        } else {
+          logger.warn({
+            originalMarker: cacheMarker,
+            totalMessages: participantMessages.length,
+          }, 'Cache marker orphaned and no valid fallback found - cache control disabled for this request')
+          cacheMarker = null
+        }
+      }
+      
       if (msgWithMarker) {
         msgWithMarker.cacheControl = { type: 'ephemeral' }
       }
@@ -789,6 +846,11 @@ export class ContextBuilder {
       const ephemeralStartIndex = cacheMarkerIndex >= 0 ? cacheMarkerIndex + 1 : 0
       for (let i = messages.length - 1; i >= ephemeralStartIndex && ephemeralImageCount < maxEphemeralImages; i--) {
         const msg = messages[i]!
+        
+        // Skip if already selected in TIER 1 (avoid double-counting when ranges overlap)
+        // This happens when cache_images=true and cacheMarkerIndex=-1 (no marker yet)
+        if (messagesWithImages.has(msg.id)) continue
+        
         for (const attachment of msg.attachments) {
           if (ephemeralImageCount >= maxEphemeralImages) break
           
