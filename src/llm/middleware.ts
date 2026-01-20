@@ -140,7 +140,7 @@ export class LLMMiddleware {
         text: request.system_prompt,
       }
       if (promptCachingEnabled) {
-        systemContent.cache_control = { type: 'ephemeral' }
+        systemContent.cache_control = { type: 'ephemeral', ttl: '1h' }
       }
       messages.push({
         role: 'system',
@@ -160,7 +160,7 @@ export class LLMMiddleware {
         text: request.context_prefix,
       }
       if (promptCachingEnabled) {
-        prefixContent.cache_control = { type: 'ephemeral' }
+        prefixContent.cache_control = { type: 'ephemeral', ttl: '1h' }
       }
       messages.push({
         role: 'assistant',
@@ -218,7 +218,7 @@ export class LLMMiddleware {
           const content = currentConversation.map(e => e.text).join(joiner)
           const contentBlock: any = { type: 'text', text: content }
           if (promptCachingEnabled) {
-            contentBlock.cache_control = { type: 'ephemeral' }
+            contentBlock.cache_control = { type: 'ephemeral', ttl: '1h' }
           }
           messages.push({
             role: 'assistant',
@@ -238,7 +238,7 @@ export class LLMMiddleware {
                 prevMsg.content = [{
                   type: 'text',
                   text: content,
-                  cache_control: { type: 'ephemeral' }
+                  cache_control: { type: 'ephemeral', ttl: '1h' }
                 }]
                 logger.debug({ 
                   messageIndex: j, 
@@ -248,7 +248,7 @@ export class LLMMiddleware {
                 // Find the last text block and add cache_control
                 for (let k = content.length - 1; k >= 0; k--) {
                   if (content[k].type === 'text' && !content[k].cache_control) {
-                    content[k].cache_control = { type: 'ephemeral' }
+                    content[k].cache_control = { type: 'ephemeral', ttl: '1h' }
                     logger.debug({ 
                       messageIndex: j, 
                       blockIndex: k 
