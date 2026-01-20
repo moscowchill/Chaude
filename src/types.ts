@@ -82,6 +82,7 @@ export interface ToolResultContent {
 
 export interface CacheControl {
   type: 'ephemeral'
+  ttl?: '5m' | '1h'
 }
 
 // ============================================================================
