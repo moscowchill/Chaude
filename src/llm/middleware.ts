@@ -333,7 +333,7 @@ export class LLMMiddleware {
         // Add tools
         messages.push({
           role: 'user',
-          content: this.formatToolsForPrefill(request.tools),
+          content: this.formatToolsForPrefill(request.tools ?? []),
         })
         
         // Add content after tools
@@ -347,7 +347,7 @@ export class LLMMiddleware {
         // Short remaining buffer but we have tools - add tools first, then conversation
         messages.push({
           role: 'user',
-          content: this.formatToolsForPrefill(request.tools),
+          content: this.formatToolsForPrefill(request.tools ?? []),
         })
         messages.push({
           role: 'assistant',
@@ -364,7 +364,7 @@ export class LLMMiddleware {
       // No remaining conversation but we have tools - still need to add them
       messages.push({
         role: 'user',
-        content: this.formatToolsForPrefill(request.tools),
+        content: this.formatToolsForPrefill(request.tools ?? []),
       })
     }
 

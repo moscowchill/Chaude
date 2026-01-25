@@ -138,6 +138,7 @@ export interface ModelConfig {
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
+  participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
 }
 
 /**
@@ -219,6 +220,20 @@ export interface BotConfig {
   
   // Soma integration (credit system)
   soma?: SomaConfig
+  
+  // Membrane integration (experimental)
+  // When true, uses membrane library for LLM calls instead of built-in providers
+  use_membrane?: boolean
+  
+  // Membrane shadow mode (for validation)
+  // When true, runs both old middleware and membrane in parallel, logs differences
+  // If use_membrane is also true, returns membrane result; otherwise returns old result
+  membrane_shadow_mode?: boolean
+  
+  // Participant stop sequences (membrane only)
+  // When true, auto-generates stop sequences from participant names to prevent
+  // the model from "speaking as" other users. Default: false (allows frags/quotes)
+  participant_stop_sequences?: boolean
 }
 
 /**
