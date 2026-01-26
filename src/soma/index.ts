@@ -1,7 +1,7 @@
 /**
  * Soma Integration Module
  * 
- * Provides optional credit system integration for ChapterX bots.
+ * Provides optional credit system integration for Chaude bots.
  * When enabled, users must have sufficient ichor (credits) to trigger bot responses.
  */
 

@@ -31,19 +31,19 @@ export interface SomaCheckParams {
 
 /** 
  * @deprecated Soma bot now handles these reactions
- * Kept for backwards compatibility but no longer used by ChapterX
+ * Kept for backwards compatibility but no longer used by Chaude
  */
 export const INSUFFICIENT_FUNDS_EMOJI = '💸'
 
 /** 
  * @deprecated Soma bot now handles these reactions
- * Kept for backwards compatibility but no longer used by ChapterX
+ * Kept for backwards compatibility but no longer used by Chaude
  */
 export const DM_FAILED_EMOJI = '📭'
 
 /**
  * Emoji for bot not configured in Soma
- * ChapterX adds this reaction since Soma can't handle unconfigured bots
+ * Chaude adds this reaction since Soma can't handle unconfigured bots
  */
 export const BOT_NOT_CONFIGURED_EMOJI = '⚙️'
 
@@ -96,7 +96,7 @@ export class SomaClient {
           // Not JSON, that's fine
         }
 
-        // BOT_NOT_CONFIGURED = block activation, let ChapterX add ⚙️ reaction
+        // BOT_NOT_CONFIGURED = block activation, let Chaude add ⚙️ reaction
         if (errorData.error === 'BOT_NOT_CONFIGURED') {
           logger.warn({ 
             status: response.status, 
@@ -250,7 +250,7 @@ export class SomaClient {
    * Format an insufficient funds message for the user
    * 
    * @deprecated The Soma Discord bot now handles insufficient funds notifications via DM.
-   * ChapterX should just add the 💸 reaction to the trigger message instead.
+   * Chaude should just add the 💸 reaction to the trigger message instead.
    */
   formatInsufficientFundsMessage(
     result: SomaCheckResult,

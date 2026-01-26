@@ -350,7 +350,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
       const openrouterAdapter = new OpenRouterAdapter({
         apiKey: openrouterKey,
         httpReferer: 'https://chapterx.local',
-        xTitle: 'ChapterX',
+        xTitle: 'Chaude',
       });
       adapters.set('openrouter', openrouterAdapter);
       logger.info('Membrane: OpenRouter adapter initialized');

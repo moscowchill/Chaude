@@ -616,7 +616,7 @@ export class AgentLoop {
       return { status: 'allowed', transactionId: result.transactionId }
     }
 
-    // Bot not configured in Soma - ChapterX adds ⚙️ reaction
+    // Bot not configured in Soma - Chaude adds ⚙️ reaction
     // (Soma can't handle this since the bot isn't registered)
     if (result.reason === 'bot_not_configured') {
       logger.warn({
@@ -638,7 +638,7 @@ export class AgentLoop {
     }
 
     // Insufficient funds - Soma bot handles 💸 reaction and DM notification
-    // ChapterX just silently blocks activation
+    // Chaude just silently blocks activation
     logger.info({
       userId: triggeringUser.id,
       cost: result.cost,

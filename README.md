@@ -1,4 +1,4 @@
-# ChapterX - Discord Bot Framework
+# Chaude - Discord Bot Framework
 
 A sophisticated Discord chat bot framework with multi-LLM support, MCP tool integration, and advanced context management.
 
@@ -266,7 +266,7 @@ npm test
 
 ### Membrane (LLM Abstraction Layer)
 
-ChapterX uses [membrane](https://github.com/antra-tess/membrane) as its LLM abstraction layer. Membrane is installed as a git dependency and won't auto-update with regular `npm install`.
+Chaude uses [membrane](https://github.com/antra-tess/membrane) as its LLM abstraction layer. Membrane is installed as a git dependency and won't auto-update with regular `npm install`.
 
 **To update membrane to the latest version:**
 
@@ -335,7 +335,7 @@ curl -X POST http://localhost:3000/api/messages/export \
 
 ## Acknowledgements
 
-ChapterX is developed to be compatible and interoperable with the [chapter2](https://github.com/joysatisficer/chapter2). Many critical concepts, including the use of Discord as the single source of truth, supporting real-time configuration via pinned Discord messages and other, have been pioneered in chapter2 by [Janus](https://x.com/repligate) and [ampdot](https://x.com/amplifiedamp)/[joysatisficer](https://x.com/joysatisficer).
+Chaude is developed to be compatible and interoperable with the [chapter2](https://github.com/joysatisficer/chapter2). Many critical concepts, including the use of Discord as the single source of truth, supporting real-time configuration via pinned Discord messages and other, have been pioneered in chapter2 by [Janus](https://x.com/repligate) and [ampdot](https://x.com/amplifiedamp)/[joysatisficer](https://x.com/joysatisficer).
 
 
 ## License
