@@ -16,19 +16,47 @@ export interface LoadConfigParams {
   channelConfigs: string[]  // Raw YAML strings from pinned messages
 }
 
+interface CacheEntry {
+  config: BotConfig
+  timestamp: number
+  channelConfigHash: string
+}
+
 export class ConfigSystem {
   private emsMode: boolean
-  
+  private configCache = new Map<string, CacheEntry>()
+  private readonly CACHE_TTL_MS = 30_000  // 30 seconds
+
   constructor(private configBasePath: string) {
     // Detect EMS mode: if EMS_PATH is set, use chapter2 layout
     this.emsMode = !!process.env.EMS_PATH
   }
 
   /**
+   * Simple hash for channel configs to detect changes
+   */
+  private hashChannelConfigs(configs: string[]): string {
+    return configs.join('|||').slice(0, 200)  // Fast approximate hash
+  }
+
+  /**
    * Load and merge configuration for a specific bot/guild/channel
+   * Results are cached for 30 seconds to avoid repeated disk I/O
    */
   loadConfig(params: LoadConfigParams): BotConfig {
     const { botName, guildId, channelConfigs } = params
+    const cacheKey = `${botName}:${guildId}`
+    const channelConfigHash = this.hashChannelConfigs(channelConfigs)
+    const now = Date.now()
+
+    // Check cache
+    const cached = this.configCache.get(cacheKey)
+    if (cached &&
+        cached.channelConfigHash === channelConfigHash &&
+        (now - cached.timestamp) < this.CACHE_TTL_MS) {
+      logger.debug({ botName, guildId, cacheAge: now - cached.timestamp }, 'Config loaded from cache')
+      return cached.config
+    }
 
     logger.debug({ botName, guildId, emsMode: this.emsMode }, 'Loading config')
 
@@ -47,9 +75,23 @@ export class ConfigSystem {
     // Validate final config
     this.validateConfig(merged)
 
+    // Cache the result
+    this.configCache.set(cacheKey, {
+      config: merged,
+      timestamp: now,
+      channelConfigHash,
+    })
+
     logger.debug({ config: merged }, 'Config loaded successfully')
 
     return merged
+  }
+
+  /**
+   * Clear config cache (useful when configs are known to have changed)
+   */
+  clearCache(): void {
+    this.configCache.clear()
   }
 
   /**
