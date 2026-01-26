@@ -1,4 +1,4 @@
-# Haiku 4.5 bot configuration
+# Haiku 4.5 - Open Source Project Observer
 
 name: Haiku4.5
 innerName: Haiku4.5
@@ -30,8 +30,8 @@ system_prompt: |
 # Model configuration
 mode: chat
 continuation_model: claude-haiku-4-5-20251001
-temperature: 1.0
-max_tokens: 16384
+temperature: 0.7  # Balance between factual and creative
+max_tokens: 8192  # Room for technical explanations
 
 # Context configuration
 recency_window_messages: 400
@@ -39,17 +39,17 @@ recency_window_characters: 100000
 rolling_threshold: 50
 recent_participant_count: 10
 
-# Image configuration
+# Image configuration (minimal - focus is on code/text)
 include_images: true
-max_images: 5
+max_images: 2
 
-# Tool configuration
+# Tool configuration (only notes needed for observer)
 tools_enabled: true
-tool_plugins: ['notes', 'upload', 'share-image', 'inject']
+tool_plugins: ['notes']
 
 # Retry configuration
 llm_retries: 3
 discord_backoff_max: 32000
 
-# Random reply (1 in 50 chance)
+# Random reply (1 in 50 chance) - for occasional memes
 reply_on_random: 50
