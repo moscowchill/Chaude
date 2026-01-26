@@ -1,0 +1,31 @@
+# Haiku 4.5 bot configuration
+
+name: Haiku4.5
+innerName: Haiku4.5
+
+# Model configuration
+mode: chat
+continuation_model: claude-haiku-4-5-20251001
+temperature: 1.0
+max_tokens: 16384
+
+# Context configuration
+recency_window_messages: 400
+recency_window_characters: 100000
+rolling_threshold: 50
+recent_participant_count: 10
+
+# Image configuration
+include_images: true
+max_images: 5
+
+# Tool configuration
+tools_enabled: true
+tool_plugins: ['notes', 'upload', 'share-image', 'inject']
+
+# Retry configuration
+llm_retries: 3
+discord_backoff_max: 32000
+
+# Random reply (1 in 50 chance)
+reply_on_random: 50

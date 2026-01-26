@@ -231,6 +231,7 @@ export class LLMMiddleware {
           // Otherwise the large text block flushed for images won't be cached!
           for (let j = messages.length - 1; j >= 0; j--) {
             const prevMsg = messages[j]
+            if (!prevMsg) continue
             if (prevMsg.role === 'assistant') {
               const content = prevMsg.content
               if (typeof content === 'string') {
@@ -466,10 +467,24 @@ export class LLMMiddleware {
       temperature: request.config.temperature,
       max_tokens: request.config.max_tokens,
       top_p: request.config.top_p,
-      tools: request.tools,
+      tools: this.formatToolsForApi(request.tools),
       presence_penalty: request.config.presence_penalty,
       frequency_penalty: request.config.frequency_penalty,
     }
+  }
+
+  /**
+   * Format tools for Anthropic API
+   * Converts inputSchema to input_schema and removes internal fields
+   */
+  private formatToolsForApi(tools?: any[]): any[] | undefined {
+    if (!tools || tools.length === 0) return undefined
+
+    return tools.map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema || tool.input_schema || { type: 'object', properties: {} },
+    }))
   }
 
   private mergeToUserMessage(messages: ParticipantMessage[]): ProviderMessage {
