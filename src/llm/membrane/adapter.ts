@@ -15,8 +15,8 @@ import type {
 } from '../../types.js';
 
 // NOTE: membrane types are defined locally until membrane is installed
-// Once `npm install membrane@github:antra-tess/membrane#main` is run,
-// these can be replaced with: import type { ... } from '@antra_tessera/membrane';
+// Once `npm install @animalabs/membrane` is run,
+// these can be replaced with: import type { ... } from '@animalabs/membrane';
 
 // ============================================================================
 // Membrane Types (local definitions until package is installed)
