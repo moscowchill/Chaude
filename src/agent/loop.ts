@@ -1888,7 +1888,109 @@ export class AgentLoop {
       
       // Get completion (routes to membrane if config.use_membrane is true)
       let completion = await this.completeLLM(continuationRequest, config)
-      
+
+      // Handle native tool_use in chat mode
+      while (completion.stopReason === 'tool_use' && config.mode === 'chat' && toolDepth < maxToolDepth) {
+        const toolUseBlocks = completion.content.filter((c: any) => c.type === 'tool_use')
+
+        if (toolUseBlocks.length === 0) break
+
+        logger.info({ toolCount: toolUseBlocks.length, toolDepth }, 'Processing native tool_use blocks')
+
+        // Execute each tool and collect results
+        const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = []
+
+        for (const toolBlock of toolUseBlocks) {
+          const toolCall: ToolCall = {
+            id: toolBlock.id,
+            name: toolBlock.name,
+            input: toolBlock.input,
+            messageId: triggeringMessageId,
+            timestamp: new Date(),
+            originalCompletionText: '',
+          }
+
+          logger.debug({ toolName: toolCall.name, input: toolCall.input }, 'Executing native tool')
+
+          const result = await this.toolSystem.executeTool(toolCall)
+          allToolCallIds.push(toolCall.id)
+
+          // Persist tool call
+          await this.toolSystem.persistToolUse(this.botId, channelId, toolCall, result)
+          pendingToolPersistence.push({ call: toolCall, result })
+
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolBlock.id,
+            content: result.error || result.output || '',
+          })
+
+          toolDepth++
+        }
+
+        // Build continuation using original completion's context
+        // We need to make a new LLM call with the tool results appended
+        // Use the middleware's transform by creating a proper LLMRequest with tool history
+
+        // For now, make a direct API call with properly formatted messages
+        // Get system prompt from the original request
+        const systemPrompt = continuationRequest.system_prompt || config.system_prompt || ''
+
+        // Transform participant messages to API format
+        const apiMessages: any[] = []
+        if (systemPrompt) {
+          apiMessages.push({ role: 'system', content: systemPrompt })
+        }
+
+        // Convert conversation messages (skip system)
+        const srcMessages = continuationRequest.messages || []
+        let buffer: any[] = []
+        const botName = config.name
+
+        for (const msg of srcMessages) {
+          const isBot = msg.participant === botName
+          const text = Array.isArray(msg.content)
+            ? msg.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
+            : (typeof msg.content === 'string' ? msg.content : '')
+
+          if (isBot) {
+            if (buffer.length > 0) {
+              apiMessages.push({ role: 'user', content: buffer.map(m => `${m.participant}: ${m.text}`).join('\n') })
+              buffer = []
+            }
+            if (text.trim()) {
+              apiMessages.push({ role: 'assistant', content: text })
+            }
+          } else {
+            buffer.push({ participant: msg.participant, text })
+          }
+        }
+        if (buffer.length > 0) {
+          apiMessages.push({ role: 'user', content: buffer.map(m => `${m.participant}: ${m.text}`).join('\n') })
+        }
+
+        // Add the assistant's tool_use response and user's tool_result
+        apiMessages.push({ role: 'assistant', content: completion.content })
+        apiMessages.push({ role: 'user', content: toolResults })
+
+        // Build continuation request with tool results (direct provider format)
+        const toolContinuationRequest = {
+          messages: apiMessages,
+          model: config.continuation_model || 'claude-haiku-4-5-20251001',
+          temperature: config.temperature ?? 1.0,
+          max_tokens: config.max_tokens ?? 8192,
+          top_p: config.top_p ?? 1.0,
+          tools: this.toolSystem.getAvailableTools().map(t => ({
+            name: t.name,
+            description: t.description,
+            input_schema: t.inputSchema || { type: 'object', properties: {} },
+          })),
+        }
+
+        // Call provider directly (bypass middleware transform)
+        completion = await this.llmMiddleware.completeRaw(toolContinuationRequest)
+      }
+
       // Handle stop sequence continuation - only if we're inside an unclosed tag
       if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
         const completionText = completion.content

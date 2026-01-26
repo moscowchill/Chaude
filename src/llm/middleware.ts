@@ -91,6 +91,21 @@ export class LLMMiddleware {
     return completion
   }
 
+  /**
+   * Complete a raw provider request directly (bypasses message transformation)
+   * Used for tool continuations in chat mode where we need to send tool_use/tool_result blocks
+   */
+  async completeRaw(request: ProviderRequest): Promise<LLMCompletion> {
+    const provider = this.selectProvider(request.model)
+
+    const completion = await retryLLM(
+      () => provider.complete(request),
+      3
+    )
+
+    return completion
+  }
+
   private selectProvider(modelName: string): LLMProvider {
     // Check vendor configs for model match
     // Each vendor is now registered with its own name

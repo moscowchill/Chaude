@@ -1,6 +1,11 @@
 # Haiku 4.5 bot configuration
 
 name: Haiku4.5
+
+system_prompt: |
+  You can see images directly in the conversation - no tool needed to view them.
+  Only use list_visible_images if you need to know image indexes for sharing.
+  Use share_image to post an image to the chat.
 innerName: Haiku4.5
 
 # Model configuration
