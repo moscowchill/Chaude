@@ -23,37 +23,29 @@ npm install
 
 ### 2. Configure Environment
 
-Create a `discord_token` file with your bot token:
+Copy the example environment file and fill in your secrets:
 
 ```bash
-echo "your-discord-bot-token" > discord_token
+cp .env.example .env
 ```
 
-Set environment variables (optional - these have defaults):
+Edit `.env` with your values:
 
 ```bash
-export CONFIG_PATH=./config  # Default: ./config
-export TOOLS_PATH=./tools    # Default: ./tools
-export CACHE_PATH=./cache    # Default: ./cache
-export LOG_LEVEL=info        # Default: info
+# Required
+DISCORD_TOKEN=your-discord-bot-token
+ANTHROPIC_API_KEY=sk-ant-api03-...
 
-# Optional: Enable REST API
-export API_BEARER_TOKEN=$(openssl rand -hex 32)  # Generate secure token
-export API_PORT=3000         # Default: 3000
+# Optional - other providers
+OPENAI_API_KEY=sk-...
+OPENROUTER_API_KEY=sk-or-...
+
+# Optional - enable REST API
+API_BEARER_TOKEN=your-secure-token  # Generate with: openssl rand -hex 32
+API_PORT=3000
 ```
 
 **Note:** The bot name is automatically determined from the Discord bot's username. Config is loaded from `config/bots/{discord-username}.yaml`.
-
-#### Optional: REST API
-
-To enable the REST API, set `API_BEARER_TOKEN`:
-
-```bash
-echo "your-secure-api-token" > api_token
-export API_BEARER_TOKEN=$(cat api_token)
-```
-
-The API will be available at `http://localhost:3000` (or your configured `API_PORT`).
 
 ### 3. Create Bot Configuration
 
@@ -80,37 +72,39 @@ toolOutputVisible: false
 
 ### 4. Configure Vendor
 
-Create `config/shared.yaml`:
+Create `config/shared.yaml` to declare which models each vendor provides. API keys are read from environment variables (set in `.env`).
 
-**Anthropic:**
+**Anthropic** (uses `ANTHROPIC_API_KEY`):
 ```yaml
 vendors:
   anthropic:
-    config:
-      anthropic_api_key: "sk-ant-..."
     provides:
       - "claude-3-5-sonnet-*"
       - "claude-3-opus-*"
       - "claude-sonnet-4-*"
 ```
 
-**OpenAI (or compatible API):**
+**OpenAI** (uses `OPENAI_API_KEY`):
 ```yaml
 vendors:
   openai:
-    config:
-      openai_api_key: "sk-..."
-      openai_base_url: "https://api.openai.com/v1"  # Optional, for compatible APIs
     provides:
       - "gpt-4o*"
       - "gpt-4-turbo*"
-      - "gpt-3.5-turbo*"
+```
+
+**OpenRouter** (uses `OPENROUTER_API_KEY`):
+```yaml
+vendors:
+  openrouter:
+    provides:
+      - "anthropic/claude-3-opus"
+      - "openai/gpt-4-turbo"
 ```
 
 **Notes on OpenAI provider:**
 - Only supports `mode: chat` (not prefill - OpenAI doesn't allow partial assistant messages)
 - Images not yet supported (different format from Anthropic)
-- For prefill support with OpenAI-compatible APIs, additional providers needed (OpenRouter, completions API)
 
 ### 5. Run
 
@@ -298,8 +292,8 @@ git ls-remote https://github.com/antra-tess/membrane.git refs/heads/main | cut -
 
 - Node.js 20+
 - TypeScript 5.3+
-- Discord bot token (in `discord_token` file)
-- LLM API keys (Anthropic, OpenAI, etc.) (in config files)
+- Discord bot token (`DISCORD_TOKEN` in `.env`)
+- LLM API keys (`ANTHROPIC_API_KEY`, etc. in `.env`)
 
 ## REST API
 
