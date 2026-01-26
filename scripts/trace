@@ -1,6 +1,6 @@
 #!/bin/bash
 # Convenience wrapper for trace tools
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ "$1" = "serve" ]; then
   shift

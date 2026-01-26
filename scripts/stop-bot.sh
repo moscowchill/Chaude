@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stop the chapter3 Discord bot
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "Stopping chapter3 bot..."
 

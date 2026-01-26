@@ -125,8 +125,10 @@ npm start
 
 ## Documentation
 
-- [Architecture](./architecture.md) - Detailed architecture documentation
-- [Requirements](./requirements.md) - Full functional requirements  
+- [Architecture](./docs/architecture.md) - Detailed architecture documentation
+- [Requirements](./docs/requirements.md) - Full functional requirements
+- [API](./docs/API.md) - REST API documentation
+- [MCP Configuration](./docs/MCP_CONFIGURATION.md) - MCP tool setup
 - [Plugins](./docs/plugins.md) - Plugin system documentation
 - [Deployment](./docs/deployment.md) - Production deployment guide
 

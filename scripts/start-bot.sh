@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start the chapter3 Discord bot
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # Check if already running
 if pgrep -f "tsx src/main.ts" > /dev/null; then
@@ -29,7 +29,7 @@ if pgrep -f "tsx src/main.ts" > /dev/null; then
     echo "  Console: tail -f logs/bot.log"
     echo "  Activations: ls -lt logs/activations/"
     echo ""
-    echo "To stop: ./stop-bot.sh"
+    echo "To stop: ./scripts/stop-bot.sh"
 else
     echo "❌ Bot failed to start. Check logs/bot.log"
     tail -20 logs/bot.log
