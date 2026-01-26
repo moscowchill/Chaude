@@ -59,20 +59,20 @@ export const logger = new Proxy(baseLogger, {
   get(target, prop: string) {
     if (['trace', 'debug', 'info', 'warn', 'error', 'fatal'].includes(prop)) {
       return (...args: unknown[]) => {
-        // Log to console
-        const logMethod = target[prop as keyof typeof target] as ((...args: unknown[]) => void)
-        logMethod(...args)
+        // Log to console - use Reflect.apply to preserve 'this' context
+        const logMethod = Reflect.get(target, prop, target) as ((...args: unknown[]) => void)
+        Reflect.apply(logMethod, target, args)
 
         // Log to file - check async context first
         const context = activationContext.getStore()
         if (context?.logger) {
           // Inside activation - log to activation file
-          const activationLogMethod = context.logger[prop as keyof typeof context.logger] as ((...args: unknown[]) => void)
-          activationLogMethod(...args)
+          const activationLogMethod = Reflect.get(context.logger, prop, context.logger) as ((...args: unknown[]) => void)
+          Reflect.apply(activationLogMethod, context.logger, args)
         } else {
           // Outside activation - log to general file
-          const fileLogMethod = generalFileLogger[prop as keyof typeof generalFileLogger] as ((...args: unknown[]) => void)
-          fileLogMethod(...args)
+          const fileLogMethod = Reflect.get(generalFileLogger, prop, generalFileLogger) as ((...args: unknown[]) => void)
+          Reflect.apply(fileLogMethod, generalFileLogger, args)
         }
 
         // Also capture to trace if we're inside an activation
@@ -94,7 +94,7 @@ export const logger = new Proxy(baseLogger, {
         }
       }
     }
-    return target[prop as keyof typeof target]
+    return Reflect.get(target, prop, target)
   }
 })
 
