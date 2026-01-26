@@ -1594,7 +1594,7 @@ export class DiscordConnector {
             const metadata = await sharp(buffer).metadata()
             width = metadata.width || 1024
             height = metadata.height || 1024
-          } catch (e) {
+          } catch {
             // Use defaults
           }
           
@@ -1656,7 +1656,7 @@ export class DiscordConnector {
         const metadata = await sharp(buffer).metadata()
         width = metadata.width || 1024
         height = metadata.height || 1024
-      } catch (e) {
+      } catch {
         logger.debug({ url }, 'Could not get image dimensions, using defaults')
       }
       

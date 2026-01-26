@@ -528,7 +528,7 @@ export class LLMMiddleware {
       }
       // Add images, stripping tokenEstimate (Anthropic API doesn't allow extra fields)
       for (const img of images) {
-        const { tokenEstimate, ...cleanImage } = img as any
+        const { tokenEstimate: _tokenEstimate, ...cleanImage } = img as any
         content.push(cleanImage)
       }
       return {
@@ -554,7 +554,7 @@ export class LLMMiddleware {
       } else if (block.type === 'image') {
         // Images are handled separately - will be added as content blocks in Anthropic format
         // Strip tokenEstimate (Anthropic API doesn't allow extra fields)
-        const { tokenEstimate, ...cleanImage } = block as any
+        const { tokenEstimate: _tokenEstimate, ...cleanImage } = block as any
         images.push(cleanImage)
       } else if (block.type === 'tool_use') {
         const toolUse = block as any

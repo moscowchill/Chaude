@@ -32,17 +32,19 @@ export function estimateBlockTokens(block: ContentBlock): number {
       // Rough estimate: 765 tokens for a typical image
       return 1000
     
-    case 'tool_use':
+    case 'tool_use': {
       const toolBlock = block as any
-      return estimateTokens(toolBlock.name || '') + 
+      return estimateTokens(toolBlock.name || '') +
              estimateTokens(JSON.stringify(toolBlock.input || {}))
-    
-    case 'tool_result':
+    }
+
+    case 'tool_result': {
       const resultBlock = block as any
       const content = typeof resultBlock.content === 'string'
         ? resultBlock.content
         : JSON.stringify(resultBlock.content || '')
       return estimateTokens(content)
+    }
     
     default:
       return 0

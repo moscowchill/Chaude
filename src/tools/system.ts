@@ -3,7 +3,7 @@
  * Wraps MCP client, plugin tools, and handles JSONL persistence
  */
 
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, writeFileSync } from 'fs'
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, writeFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -163,7 +163,7 @@ export class ToolSystem {
           resources: resources.map((r: any) => r.name)
         }, 'MCP resources discovered')
       }
-    } catch (e) {
+    } catch {
       // Server may not support resources - that's ok
       logger.debug({ server: config.name }, 'MCP server does not support resources')
     }
@@ -824,7 +824,6 @@ export class ToolSystem {
       if (filteredLines.length < lines.length) {
         if (filteredLines.length === 0) {
           // Delete empty file
-          const { unlinkSync } = require('fs')
           unlinkSync(filePath)
         } else {
           writeFileSync(filePath, filteredLines.join('\n') + '\n')
