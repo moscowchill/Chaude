@@ -15,7 +15,15 @@ import {
   OpenAIAdapter,
   OpenAICompatibleAdapter,
 } from '@animalabs/membrane';
-import type { ProviderAdapter, MembraneConfig } from '@animalabs/membrane';
+import type {
+  ProviderAdapter,
+  MembraneConfig,
+  ProviderRequest,
+  ProviderRequestOptions,
+  ProviderResponse,
+  StreamCallbacks,
+  MembraneHooks,
+} from '@animalabs/membrane';
 import { createTracingHooks } from './hooks.js';
 import { logger } from '../../utils/logger.js';
 
@@ -234,12 +242,12 @@ class RoutingAdapter implements ProviderAdapter {
     return false;
   }
   
-  async complete(request: any, options?: any): Promise<any> {
+  async complete(request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> {
     const adapter = this.selectAdapter(request.model);
     return adapter.complete(request, options);
   }
-  
-  async stream(request: any, callbacks: any, options?: any): Promise<any> {
+
+  async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
     const adapter = this.selectAdapter(request.model);
     return adapter.stream(request, callbacks, options);
   }
@@ -433,12 +441,10 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   const routingAdapter = new RoutingAdapter(adapters);
   
   // Build membrane config
-  // Note: Cast hooks to any because our local type definitions may not exactly match
-  // membrane's updated types. The implementation is correct, just type mismatch.
   const membraneConfig: MembraneConfig = {
     assistantParticipant: config.assistantName,
     maxParticipantsForStop: config.maxParticipantsForStop,
-    hooks: createTracingHooks() as any,
+    hooks: createTracingHooks() as MembraneHooks,
     debug: config.debug,
   };
   

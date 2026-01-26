@@ -326,7 +326,7 @@ function logRequestToFile(params: unknown): string | undefined {
     // Extract images to blob store before logging (if available)
     let processedParams = params;
     try {
-      processedParams = processRequestForLogging(params);
+      processedParams = processRequestForLogging(params as Record<string, unknown>);
     } catch {
       // processRequestForLogging may not handle all formats
     }

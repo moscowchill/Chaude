@@ -9,8 +9,12 @@ import {
   ParticipantMessage,
   ContentBlock,
   TextContent,
+  ImageContent,
+  ToolUseContent,
+  ToolResultContent,
   LLMError,
   VendorConfig,
+  ToolDefinition,
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryLLM } from '../utils/retry.js'
@@ -22,6 +26,26 @@ export interface LLMProvider {
   complete(request: ProviderRequest): Promise<LLMCompletion>
 }
 
+/** Content block for Anthropic API messages */
+export interface AnthropicContentBlock {
+  type: string
+  text?: string
+  source?: {
+    type: 'base64' | 'url'
+    data: string
+    media_type: string
+  }
+  cache_control?: { type: string; ttl?: string }
+  [key: string]: unknown  // Allow additional properties for different block types
+}
+
+/** Tool definition for Anthropic API */
+export interface AnthropicToolDefinition {
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+}
+
 export interface ProviderRequest {
   messages: ProviderMessage[]
   model: string
@@ -29,14 +53,14 @@ export interface ProviderRequest {
   max_tokens: number
   top_p: number
   stop_sequences?: string[]
-  tools?: any[]
+  tools?: AnthropicToolDefinition[]
   presence_penalty?: number
   frequency_penalty?: number
 }
 
 export interface ProviderMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string | any[]
+  content: string | AnthropicContentBlock[]
 }
 
 export class LLMMiddleware {
@@ -150,8 +174,8 @@ export class LLMMiddleware {
     
     // Add system prompt if present (with cache_control for prompt caching if enabled)
     if (request.system_prompt) {
-      const systemContent: any = { 
-        type: 'text', 
+      const systemContent: AnthropicContentBlock = {
+        type: 'text',
         text: request.system_prompt,
       }
       if (promptCachingEnabled) {
@@ -162,7 +186,7 @@ export class LLMMiddleware {
         content: [systemContent],
       })
     }
-    
+
     // Add context prefix as first cached assistant message (for simulacrum seeding)
     if (request.context_prefix) {
       // Need a user message first (Anthropic requires user->assistant alternation)
@@ -170,8 +194,8 @@ export class LLMMiddleware {
         role: 'user',
         content: '[conversation begins]',
       })
-      const prefixContent: any = { 
-        type: 'text', 
+      const prefixContent: AnthropicContentBlock = {
+        type: 'text',
         text: request.context_prefix,
       }
       if (promptCachingEnabled) {
@@ -206,7 +230,7 @@ export class LLMMiddleware {
         }
         
         // Add message with image as user turn
-        const userContent: any[] = []
+        const userContent: AnthropicContentBlock[] = []
         if (formatted.text) {
           userContent.push({type: 'text', text: `${msg.participant}: ${formatted.text}`})
         }
@@ -231,7 +255,7 @@ export class LLMMiddleware {
         // Flush everything before this message WITH cache_control (if caching enabled)
         if (currentConversation.length > 0) {
           const content = currentConversation.map(e => e.text).join(joiner)
-          const contentBlock: any = { type: 'text', text: content }
+          const contentBlock: AnthropicContentBlock = { type: 'text', text: content }
           if (promptCachingEnabled) {
             contentBlock.cache_control = { type: 'ephemeral', ttl: '1h' }
           }
@@ -263,11 +287,12 @@ export class LLMMiddleware {
               } else if (Array.isArray(content)) {
                 // Find the last text block and add cache_control
                 for (let k = content.length - 1; k >= 0; k--) {
-                  if (content[k].type === 'text' && !content[k].cache_control) {
-                    content[k].cache_control = { type: 'ephemeral', ttl: '1h' }
-                    logger.debug({ 
-                      messageIndex: j, 
-                      blockIndex: k 
+                  const contentBlock = content[k]
+                  if (contentBlock && contentBlock.type === 'text' && !contentBlock.cache_control) {
+                    contentBlock.cache_control = { type: 'ephemeral', ttl: '1h' }
+                    logger.debug({
+                      messageIndex: j,
+                      blockIndex: k
                     }, 'Added cache_control to previous assistant content block (image-induced flush recovery)')
                     break
                   }
@@ -467,9 +492,12 @@ export class LLMMiddleware {
           userMsg.content = `${userMsg.content}:\n${botName}:`
         } else if (Array.isArray(userMsg.content)) {
           // Find last text block and append
-          const lastTextIdx = userMsg.content.map((c: any) => c.type).lastIndexOf('text')
+          const lastTextIdx = userMsg.content.map((c: AnthropicContentBlock) => c.type).lastIndexOf('text')
           if (lastTextIdx >= 0) {
-            (userMsg.content[lastTextIdx] as any).text += `:\n${botName}:`
+            const block = userMsg.content[lastTextIdx] as AnthropicContentBlock
+            if (block.text !== undefined) {
+              block.text += `:\n${botName}:`
+            }
           }
         }
       }
@@ -492,19 +520,19 @@ export class LLMMiddleware {
    * Format tools for Anthropic API
    * Converts inputSchema to input_schema and removes internal fields
    */
-  private formatToolsForApi(tools?: any[]): any[] | undefined {
+  private formatToolsForApi(tools?: ToolDefinition[]): AnthropicToolDefinition[] | undefined {
     if (!tools || tools.length === 0) return undefined
 
     return tools.map(tool => ({
       name: tool.name,
       description: tool.description,
-      input_schema: tool.inputSchema || tool.input_schema || { type: 'object', properties: {} },
+      input_schema: tool.inputSchema as Record<string, unknown> || { type: 'object', properties: {} },
     }))
   }
 
   private mergeToUserMessage(messages: ParticipantMessage[]): ProviderMessage {
     const parts: string[] = []
-    const images: any[] = []
+    const images: ImageContent[] = []
 
     for (const msg of messages) {
       const text = this.extractText(msg.content)
@@ -514,22 +542,22 @@ export class LLMMiddleware {
       // Collect images
       for (const block of msg.content) {
         if (block.type === 'image') {
-          images.push(block)
+          images.push(block as ImageContent)
         }
       }
     }
 
     // If there are images, return content as array of blocks
     if (images.length > 0) {
-      const content: any[] = []
+      const content: AnthropicContentBlock[] = []
       // Add text first
       if (parts.length > 0) {
         content.push({ type: 'text', text: parts.join('\n') })
       }
       // Add images, stripping tokenEstimate (Anthropic API doesn't allow extra fields)
       for (const img of images) {
-        const { tokenEstimate: _tokenEstimate, ...cleanImage } = img as any
-        content.push(cleanImage)
+        const { tokenEstimate: _tokenEstimate, ...cleanImage } = img as ImageContent & { tokenEstimate?: number }
+        content.push(cleanImage as AnthropicContentBlock)
       }
       return {
         role: 'user',
@@ -544,26 +572,27 @@ export class LLMMiddleware {
     }
   }
 
-  private formatContentForPrefill(content: ContentBlock[], participant: string): {text: string, images: any[]} {
+  private formatContentForPrefill(content: ContentBlock[], participant: string): {text: string, images: AnthropicContentBlock[]} {
     const parts: string[] = []
-    const images: any[] = []
+    const images: AnthropicContentBlock[] = []
 
     for (const block of content) {
       if (block.type === 'text') {
-        parts.push((block as any).text)
+        parts.push((block as TextContent).text)
       } else if (block.type === 'image') {
         // Images are handled separately - will be added as content blocks in Anthropic format
         // Strip tokenEstimate (Anthropic API doesn't allow extra fields)
-        const { tokenEstimate: _tokenEstimate, ...cleanImage } = block as any
-        images.push(cleanImage)
+        const imageBlock = block as ImageContent & { tokenEstimate?: number }
+        const { tokenEstimate: _tokenEstimate, ...cleanImage } = imageBlock
+        images.push(cleanImage as AnthropicContentBlock)
       } else if (block.type === 'tool_use') {
-        const toolUse = block as any
+        const toolUse = block as ToolUseContent
         // Format as: Name>[toolname]: {json}
         parts.push(`${participant}>[${toolUse.name}]: ${JSON.stringify(toolUse.input)}`)
       } else if (block.type === 'tool_result') {
-        const toolResult = block as any
-        const resultText = typeof toolResult.content === 'string' 
-          ? toolResult.content 
+        const toolResult = block as ToolResultContent
+        const resultText = typeof toolResult.content === 'string'
+          ? toolResult.content
           : JSON.stringify(toolResult.content)
         // Format as: Name<[toolname]: result
         // Extract tool name from ID or use generic
@@ -595,7 +624,7 @@ export class LLMMiddleware {
   private static readonly FUNC_CALLS_OPEN_EX = '<' + 'function_calls>'
   private static readonly FUNC_CALLS_CLOSE_EX = '</' + 'function_calls>'
 
-  private formatToolsForPrefill(tools: any[]): string {
+  private formatToolsForPrefill(tools: ToolDefinition[]): string {
     // Format each tool as JSON inside <function> tags (Anthropic's actual format)
     const formatted = tools.map((tool) => {
       const toolDef = {

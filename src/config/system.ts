@@ -150,7 +150,7 @@ export class ConfigSystem {
 
   private mergeConfigs(configs: Partial<BotConfig>[], botName: string): BotConfig {
     // Deep merge all configs
-    const merged: any = {}
+    const merged: Record<string, unknown> = {}
 
     for (const config of configs) {
       for (const [key, value] of Object.entries(config)) {
@@ -161,7 +161,7 @@ export class ConfigSystem {
         if (typeof value === 'object' && !Array.isArray(value) && value !== null) {
           // Deep merge objects
           const existing = merged[key] || {}
-          merged[key] = { ...existing, ...(value as Record<string, any>) }
+          merged[key] = { ...(existing as Record<string, unknown>), ...(value as Record<string, unknown>) }
         } else {
           // Override primitives and arrays
           merged[key] = value

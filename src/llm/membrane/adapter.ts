@@ -12,6 +12,7 @@ import type {
   LLMCompletion,
   ToolDefinition,
   StopReason,
+  JSONSchema,
 } from '../../types.js';
 
 // NOTE: membrane types are defined locally until membrane is installed
@@ -252,7 +253,7 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
               type: 'url',
               url: block.source.data,
             },
-        tokenEstimate: (block as any).tokenEstimate,
+        tokenEstimate: (block as unknown as { tokenEstimate?: number }).tokenEstimate,
       };
       
     case 'tool_use':
@@ -319,7 +320,7 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
         type: 'tool_use',
         id: toolBlock.id,
         name: toolBlock.name,
-        input: toolBlock.input as Record<string, any>,
+        input: toolBlock.input as Record<string, unknown>,
       };
     }
       
@@ -339,7 +340,7 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
       // Convert thinking block to text (chapterx doesn't have native thinking type)
       return {
         type: 'text',
-        text: `<thinking>${(block as any).thinking}</thinking>`,
+        text: `<thinking>${(block as { type: 'thinking'; thinking: string }).thinking}</thinking>`,
       };
       
     default:
@@ -505,7 +506,7 @@ export function toMembraneToolDefinition(tool: ToolDefinition): MembraneToolDefi
     description: tool.description,
     inputSchema: {
       type: 'object',
-      properties: tool.inputSchema.properties as Record<string, any> ?? {},
+      properties: tool.inputSchema.properties as Record<string, unknown> ?? {},
       required: tool.inputSchema.required,
     },
   };
@@ -520,7 +521,7 @@ export function fromMembraneToolDefinition(tool: MembraneToolDefinition): ToolDe
     description: tool.description,
     inputSchema: {
       type: 'object',
-      properties: tool.inputSchema.properties as Record<string, any>,
+      properties: tool.inputSchema.properties as Record<string, JSONSchema>,
       required: tool.inputSchema.required,
     },
   };

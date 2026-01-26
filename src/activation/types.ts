@@ -16,12 +16,12 @@ export interface ActivationTrigger {
 export interface ToolCall {
   id: string
   name: string
-  input: any
+  input: unknown
 }
 
 export interface ToolResult {
   callId: string
-  output: any
+  output: unknown
   error?: string
 }
 

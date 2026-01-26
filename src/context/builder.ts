@@ -8,7 +8,9 @@ import {
   ContextBuildResult,
   ParticipantMessage,
   ContentBlock,
+  TextContent,
   ImageContent,
+  ToolResultContent,
   DiscordMessage,
   DiscordContext,
   CachedImage,
@@ -38,7 +40,7 @@ import { ContextInjection } from '../tools/plugins/types.js'
 
 export interface BuildContextParams {
   discordContext: DiscordContext
-  toolCacheWithResults: Array<{call: ToolCall, result: any}>
+  toolCacheWithResults: Array<{call: ToolCall, result: unknown}>
   lastCacheMarker: string | null
   messagesSinceRoll: number
   config: BotConfig
@@ -334,7 +336,7 @@ export class ContextBuilder {
   private buildTraceInfo(
     finalMessages: ParticipantMessage[],
     _discordContext: DiscordContext,
-    toolCacheWithResults: Array<{call: ToolCall, result: any}>,
+    toolCacheWithResults: Array<{call: ToolCall, result: unknown}>,
     config: BotConfig,
     metadata: {
       originalMessageCount: number
@@ -375,7 +377,7 @@ export class ContextBuilder {
           imageCount++
           totalImages++
           // Add image detail with actual token estimate
-          const imgBlock = block as any
+          const imgBlock = block as ImageContent & { tokenEstimate?: number }
           imageDetails.push({
             discordMessageId: msg.messageId || '',
             url: 'embedded',  // Base64 embedded
@@ -424,7 +426,7 @@ export class ContextBuilder {
         // Check for images and use actual token estimates
         for (const block of msg.content) {
           if (block.type === 'image') {
-            const imgBlock = block as any
+            const imgBlock = block as ImageContent & { tokenEstimate?: number }
             const estimate = imgBlock.tokenEstimate || 1000  // Fallback to 1000 if no estimate
             imageTokens += estimate
           }
@@ -432,7 +434,7 @@ export class ContextBuilder {
         // Subtract image tokens from message tokens (they're counted separately)
         const imgTokensInMsg = msg.content
           .filter(b => b.type === 'image')
-          .reduce((sum, b) => sum + ((b as any).tokenEstimate || 1000), 0)
+          .reduce((sum, b) => sum + ((b as ImageContent & { tokenEstimate?: number }).tokenEstimate || 1000), 0)
         messageTokens += msgTokens - imgTokensInMsg
       }
     }
@@ -595,9 +597,9 @@ export class ContextBuilder {
     for (const msg of messages) {
       for (const block of msg.content) {
         if (block.type === 'text') {
-          totalChars += (block as any).text.length
+          totalChars += (block as TextContent).text.length
         } else if (block.type === 'tool_result') {
-          const toolBlock = block as any
+          const toolBlock = block as ToolResultContent
           const content = typeof toolBlock.content === 'string' 
             ? toolBlock.content 
             : JSON.stringify(toolBlock.content)
@@ -686,9 +688,9 @@ export class ContextBuilder {
       
       for (const block of msg.content) {
         if (block.type === 'text') {
-          msgSize += (block as any).text.length
+          msgSize += (block as TextContent).text.length
         } else if (block.type === 'tool_result') {
-          const toolBlock = block as any
+          const toolBlock = block as ToolResultContent
           const content = typeof toolBlock.content === 'string' 
             ? toolBlock.content 
             : JSON.stringify(toolBlock.content)
@@ -970,7 +972,7 @@ export class ContextBuilder {
                   media_type: mediaType,  // Anthropic API uses snake_case
                 },
                 tokenEstimate,  // For accurate context size calculation
-              } as any)
+              } as ImageContent & { tokenEstimate: number })
               
               logger.debug({ 
                 messageId: msg.id, 
@@ -1199,7 +1201,7 @@ export class ContextBuilder {
   }
 
   private formatToolUseWithResults(
-    toolCacheWithResults: Array<{call: ToolCall, result: any}>, 
+    toolCacheWithResults: Array<{call: ToolCall, result: unknown}>,
     botName: string
   ): ParticipantMessage[] {
     const messages: ParticipantMessage[] = []
@@ -1221,19 +1223,20 @@ export class ContextBuilder {
       // Tool result message from SYSTEM (not bot)
       // Result can be: string (legacy), { output, images } (new format), or other object
       const resultContent: ContentBlock[] = []
-      
+
       if (typeof entry.result === 'string') {
         // Legacy string result
         resultContent.push({ type: 'text', text: entry.result })
       } else if (entry.result && typeof entry.result === 'object') {
         // New format with output and optional images
-        const output = entry.result.output
+        const resultObj = entry.result as Record<string, unknown>
+        const output = resultObj.output
         const outputText = typeof output === 'string' ? output : JSON.stringify(output)
         resultContent.push({ type: 'text', text: outputText })
-        
+
         // Add MCP images to context
-        if (entry.result.images && Array.isArray(entry.result.images)) {
-          for (const img of entry.result.images) {
+        if (resultObj.images && Array.isArray(resultObj.images)) {
+          for (const img of resultObj.images as Array<{ data?: string; mimeType?: string }>) {
             if (img.data && img.mimeType) {
               resultContent.push({
                 type: 'image',
@@ -1266,7 +1269,7 @@ export class ContextBuilder {
    * Tool results are attributed to System, not the bot
    */
   formatToolResults(
-    toolCalls: Array<{ call: ToolCall; result: any }>
+    toolCalls: Array<{ call: ToolCall; result: unknown }>
   ): ParticipantMessage[] {
     const messages: ParticipantMessage[] = []
 
@@ -1395,10 +1398,10 @@ export class ContextBuilder {
         const { completion } = completionMap.get(msg.messageId)!
         // Replace content with full completion text (legacy behavior)
         msg.content = [{ type: 'text', text: completion.text }]
-        logger.debug({ 
-          messageId: msg.messageId, 
-          originalLength: msg.content[0]?.type === 'text' ? (msg.content[0] as any).text?.length : 0,
-          newLength: completion.text.length 
+        logger.debug({
+          messageId: msg.messageId,
+          originalLength: msg.content[0]?.type === 'text' ? (msg.content[0] as TextContent).text?.length : 0,
+          newLength: completion.text.length
         }, 'Injected full completion into bot message (legacy)')
       } else if (msg.messageId && msg.participant === botName) {
         // Log why we didn't inject with more detail
@@ -1451,7 +1454,7 @@ export class ContextBuilder {
       }
       
       const activationId = messageToActivationId.get(msg.messageId)!
-      let mergedContent = msg.content[0]?.type === 'text' ? (msg.content[0] as any).text : ''
+      let mergedContent = msg.content[0]?.type === 'text' ? (msg.content[0] as TextContent).text : ''
       let mergeCount = 0
       
       // Look ahead for consecutive messages from same activation
@@ -1467,7 +1470,7 @@ export class ContextBuilder {
         }
         
         // Merge this message's content (context chunk) into the first
-        const nextContent = nextMsg.content[0]?.type === 'text' ? (nextMsg.content[0] as any).text : ''
+        const nextContent = nextMsg.content[0]?.type === 'text' ? (nextMsg.content[0] as TextContent).text : ''
         if (nextContent) {
           mergedContent += nextContent  // Concatenate context chunks
         }

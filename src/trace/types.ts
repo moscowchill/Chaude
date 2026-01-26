@@ -50,7 +50,7 @@ export interface ActivationTrace {
   durationMs?: number
   
   /** Full bot configuration used for this activation */
-  config?: Record<string, any>
+  config?: Record<string, unknown>
 }
 
 // ============================================================================

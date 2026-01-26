@@ -16,7 +16,7 @@ export type StateScope = 'global' | 'channel' | 'epic' | 'off'
 export interface StateEvent {
   messageId: string
   timestamp: string
-  delta: any  // The state change
+  delta: unknown  // The state change
 }
 
 export interface ChannelStateMetadata {
@@ -30,8 +30,8 @@ export class PluginStateManager {
   private pluginId: string
   
   // In-memory cache for performance
-  private globalCache: any = null
-  private channelCache = new Map<string, any>()
+  private globalCache: unknown = null
+  private channelCache = new Map<string, { state: unknown; metadata: ChannelStateMetadata }>()
   private epicEventsCache = new Map<string, StateEvent[]>()
   
   constructor(cacheDir: string, pluginId: string) {
@@ -54,8 +54,8 @@ export class PluginStateManager {
       const data = await fs.readFile(this.globalPath, 'utf-8')
       this.globalCache = JSON.parse(data)
       return this.globalCache as T
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
+    } catch (err: unknown) {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
         return null
       }
       logger.error({ err, pluginId: this.pluginId }, 'Failed to read global state')
@@ -85,7 +85,7 @@ export class PluginStateManager {
   ): Promise<{ state: T | null; metadata: ChannelStateMetadata }> {
     // Check cache first
     if (this.channelCache.has(channelId)) {
-      return this.channelCache.get(channelId)
+      return this.channelCache.get(channelId) as { state: T | null; metadata: ChannelStateMetadata }
     }
     
     try {
@@ -97,8 +97,8 @@ export class PluginStateManager {
       }
       this.channelCache.set(channelId, result)
       return result
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
+    } catch (err: unknown) {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
         // No state for this channel - try inheriting
         if (inheritFrom?.historyOriginChannelId) {
           // .history jump - inherit from origin
@@ -187,8 +187,8 @@ export class PluginStateManager {
       const events = JSON.parse(data) as StateEvent[]
       this.epicEventsCache.set(channelId, events)
       return events
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
+    } catch (err: unknown) {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
         return []
       }
       throw err
@@ -204,7 +204,7 @@ export class PluginStateManager {
   /**
    * Record a state change tied to a message ID
    */
-  async recordEpicEvent(channelId: string, messageId: string, delta: any): Promise<void> {
+  async recordEpicEvent(channelId: string, messageId: string, delta: unknown): Promise<void> {
     const events = await this.getEpicEvents(channelId)
     
     // Remove any existing event for this message (update case)
@@ -235,7 +235,7 @@ export class PluginStateManager {
     channelId: string,
     upToMessageId: string | null,
     messageIds: Set<string> | null,
-    reducer: (state: T | null, delta: any) => T
+    reducer: (state: T | null, delta: unknown) => T
   ): Promise<T | null> {
     const events = await this.getEpicEvents(channelId)
     

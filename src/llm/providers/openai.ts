@@ -22,6 +22,40 @@ export interface OpenAIProviderConfig {
   baseUrl?: string  // For compatible endpoints (default: https://api.openai.com/v1)
 }
 
+// Minimal type for content block in message content arrays
+interface ContentBlockInput {
+  type: string
+  text?: string
+  source?: {
+    type?: string
+    data?: string
+    media_type?: string
+  }
+}
+
+// Minimal type for OpenAI chat completion response
+interface OpenAIChatResponse {
+  choices?: Array<{
+    finish_reason?: string | null
+    message?: {
+      content?: string
+      tool_calls?: Array<{
+        type: string
+        id: string
+        function: {
+          name: string
+          arguments: string
+        }
+      }>
+    }
+  }>
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+  }
+  model?: string
+}
+
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai'
   // OpenAI doesn't support true prefill, but we can do chat mode
@@ -45,7 +79,7 @@ export class OpenAIProvider implements LLMProvider {
 
     // Build request body BEFORE try block so we can log it even on error
     // Note: Newer OpenAI models (gpt-5.x, o1, o3) use max_completion_tokens instead of max_tokens
-    const body: any = {
+    const body: Record<string, unknown> = {
       model: request.model,
       messages: request.messages.map(m => ({
         role: m.role,
@@ -68,7 +102,7 @@ export class OpenAIProvider implements LLMProvider {
         function: {
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema,
+          parameters: tool.input_schema,
         }
       }))
     }
@@ -101,7 +135,7 @@ export class OpenAIProvider implements LLMProvider {
         throw new Error(`OpenAI API error ${response.status}: ${errorText}`)
       }
 
-      const data = await response.json() as any
+      const data = await response.json() as OpenAIChatResponse
 
       // Log response to file
       const responseRef = this.logResponseToFile(data)
@@ -141,8 +175,8 @@ export class OpenAIProvider implements LLMProvider {
 
       // Calculate metrics
       const textLength = content
-        .filter(c => c.type === 'text')
-        .reduce((sum, c) => sum + ((c as any).text?.length || 0), 0)
+        .filter((c): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+        .reduce((sum, c) => sum + (c.text?.length || 0), 0)
       const toolUseCount = content.filter(c => c.type === 'tool_use').length
 
       // Record to trace
@@ -187,7 +221,7 @@ export class OpenAIProvider implements LLMProvider {
         model: data.model || request.model,
         raw: data,
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Record error to trace (request body was already logged above)
       if (trace && callId) {
         trace.failLLMCall(callId, {
@@ -242,18 +276,18 @@ export class OpenAIProvider implements LLMProvider {
    * - String content passes through as-is
    * - Array content has image blocks converted from Anthropic format to OpenAI format
    */
-  private transformContent(content: string | any[]): string | any[] {
+  private transformContent(content: string | ContentBlockInput[]): string | Record<string, unknown>[] {
     // String content passes through
     if (typeof content === 'string') {
       return content
     }
 
     // Array content needs image transformation
-    return content.map(block => {
+    return content.map((block): Record<string, unknown> => {
       if (block.type === 'text') {
         return { type: 'text', text: block.text }
       }
-      
+
       if (block.type === 'image') {
         // Transform from Anthropic format to OpenAI format
         // Anthropic: { type: 'image', source: { type: 'base64', data: '...', media_type: 'image/jpeg' } }
@@ -269,11 +303,11 @@ export class OpenAIProvider implements LLMProvider {
       }
 
       // Pass through other block types (shouldn't happen but be safe)
-      return block
+      return block as unknown as Record<string, unknown>
     })
   }
 
-  private logRequestToFile(params: any): string | undefined {
+  private logRequestToFile(params: Record<string, unknown>): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-requests')
       if (!existsSync(dir)) {
@@ -287,13 +321,13 @@ export class OpenAIProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(params, null, 2))
       logger.debug({ filename }, 'Logged request to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log request to file')
       return undefined
     }
   }
 
-  private logResponseToFile(response: any): string | undefined {
+  private logResponseToFile(response: OpenAIChatResponse): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-responses')
       if (!existsSync(dir)) {
@@ -307,7 +341,7 @@ export class OpenAIProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(response, null, 2))
       logger.debug({ filename }, 'Logged response to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log response to file')
       return undefined
     }

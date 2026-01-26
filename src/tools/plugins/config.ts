@@ -118,8 +118,9 @@ const plugin: ToolPlugin = {
           }
           
           return `Config change pinned. ${key} will update on next message.`
-        } catch (err: any) {
-          return `Error: ${err?.message || err?.toString() || 'Unknown error'}`
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err)
+          return `Error: ${message || 'Unknown error'}`
         }
       }
     }

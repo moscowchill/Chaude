@@ -31,9 +31,10 @@ export function validateEnv(vars: string[]): void {
 /**
  * Validate bot configuration
  */
-export function validateBotConfig(config: any): void {
+export function validateBotConfig(config: unknown): void {
+  const configObj = config as Record<string, unknown>
   const required = ['name', 'continuation_model']
-  const missing = required.filter((field) => !config[field])
+  const missing = required.filter((field) => !configObj[field])
   if (missing.length > 0) {
     throw new ConfigError(
       `Missing required bot config fields: ${missing.join(', ')}`

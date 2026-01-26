@@ -58,7 +58,7 @@ const plugin: ToolPlugin = {
         type: 'object',
         properties: {},
       },
-      handler: async (_input: any, context: PluginContext) => {
+      handler: async (_input: unknown, context: PluginContext) => {
         logger.debug({ channelId: context.channelId }, 'Notes list requested')
         // Note: Handler can't access state directly, but we return a message
         // The actual notes are visible in context injection
@@ -163,10 +163,11 @@ const plugin: ToolPlugin = {
    */
   onToolExecution: async (
     toolName: string,
-    input: any,
-    _result: any,
+    input: unknown,
+    _result: unknown,
     context: PluginStateContext
   ): Promise<void> => {
+    const inputObj = input as Record<string, unknown>
     // Use configured scope (defaults to 'channel')
     const scope = context.configuredScope
     const state = await context.getState<NotesState>(scope) || {
@@ -177,7 +178,7 @@ const plugin: ToolPlugin = {
     if (toolName === 'save_note') {
       const newNote: Note = {
         id: `note_${Date.now().toString(36)}`,
-        content: input.content,
+        content: inputObj.content as string,
         createdAt: new Date().toISOString(),
         createdByMessageId: context.currentMessageId,
       }
@@ -194,14 +195,14 @@ const plugin: ToolPlugin = {
     }
     
     if (toolName === 'delete_note') {
-      const noteIndex = state.notes.findIndex(n => n.id === input.id)
+      const noteIndex = state.notes.findIndex(n => n.id === inputObj.id)
       if (noteIndex >= 0) {
         state.notes.splice(noteIndex, 1)
         state.lastModifiedMessageId = context.currentMessageId
         
         await context.setState(scope, state)
         logger.info({ 
-          noteId: input.id, 
+          noteId: inputObj.id,
           channelId: context.channelId,
           scope 
         }, 'Note deleted')
@@ -214,10 +215,11 @@ const plugin: ToolPlugin = {
    */
   postProcessResult: async (
     toolName: string,
-    input: any,
+    input: unknown,
     result: string,
     context: PluginStateContext
   ): Promise<string> => {
+    const inputObj = input as Record<string, unknown>
     if (toolName === 'read_note') {
       const scope = context.configuredScope
       const state = await context.getState<NotesState>(scope)
@@ -226,30 +228,30 @@ const plugin: ToolPlugin = {
         return 'No notes saved yet.'
       }
       
-      if (input.id) {
-        const note = state.notes.find(n => n.id === input.id)
+      if (inputObj.id) {
+        const note = state.notes.find(n => n.id === inputObj.id)
         if (note) {
           return `**Note [${note.id}]** (created ${note.createdAt}):\n\n${note.content}`
         }
-        return `Note not found: ${input.id}`
+        return `Note not found: ${inputObj.id}`
       }
-      
-      if (input.search) {
-        const searchLower = input.search.toLowerCase()
-        const matches = state.notes.filter(n => 
+
+      if (inputObj.search) {
+        const searchLower = (inputObj.search as string).toLowerCase()
+        const matches = state.notes.filter(n =>
           n.content.toLowerCase().includes(searchLower)
         )
-        
+
         if (matches.length === 0) {
-          return `No notes found matching: "${input.search}"`
+          return `No notes found matching: "${inputObj.search}"`
         }
-        
+
         if (matches.length === 1) {
           const note = matches[0]!
           return `**Note [${note.id}]** (created ${note.createdAt}):\n\n${note.content}`
         }
-        
-        return `Found ${matches.length} notes matching "${input.search}":\n\n` +
+
+        return `Found ${matches.length} notes matching "${inputObj.search}":\n\n` +
           matches.map(n => `- [${n.id}] ${n.content.slice(0, 100)}${n.content.length > 100 ? '...' : ''}`).join('\n')
       }
       

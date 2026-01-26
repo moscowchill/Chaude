@@ -47,7 +47,7 @@ export class OpenAIImageProvider implements LLMProvider {
     }
 
     // Build request body for image generation
-    const body: any = {
+    const body: Record<string, unknown> = {
       model: request.model,
       prompt: prompt,
       n: 1,
@@ -84,7 +84,7 @@ export class OpenAIImageProvider implements LLMProvider {
       const durationMs = Date.now() - startTime
 
       // Log response
-      const responseRef = this.logResponseToFile(data)
+      const responseRef = this.logResponseToFile(data as Record<string, unknown>)
 
       // Type the response data
       const responseData = data as { data?: Array<{ b64_json?: string }> }
@@ -156,14 +156,15 @@ export class OpenAIImageProvider implements LLMProvider {
         raw: data,
       }
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       const durationMs = Date.now() - startTime
-      logger.error({ error: error.message, model: request.model, durationMs }, 'OpenAI Image API call failed')
-      
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      logger.error({ error: errorMessage, model: request.model, durationMs }, 'OpenAI Image API call failed')
+
       if (error instanceof LLMError) {
         throw error
       }
-      throw new LLMError(`OpenAI Image API failed: ${error.message}`)
+      throw new LLMError(`OpenAI Image API failed: ${errorMessage}`)
     }
   }
 
@@ -180,7 +181,7 @@ export class OpenAIImageProvider implements LLMProvider {
         parts.push(msg.content)
       } else if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
-          if (block.type === 'text') {
+          if (block.type === 'text' && block.text) {
             parts.push(block.text)
           }
         }
@@ -190,7 +191,7 @@ export class OpenAIImageProvider implements LLMProvider {
     return parts.join('\n').trim()
   }
 
-  private logRequestToFile(body: any): string | undefined {
+  private logRequestToFile(body: Record<string, unknown>): string | undefined {
     try {
       const logsDir = process.env.LOGS_DIR || './logs'
       const requestsDir = join(logsDir, 'llm-requests')
@@ -212,22 +213,23 @@ export class OpenAIImageProvider implements LLMProvider {
     }
   }
 
-  private logResponseToFile(response: any): string | undefined {
+  private logResponseToFile(response: Record<string, unknown>): string | undefined {
     try {
       const logsDir = process.env.LOGS_DIR || './logs'
       const responsesDir = join(logsDir, 'llm-responses')
-      
+
       if (!existsSync(responsesDir)) {
         mkdirSync(responsesDir, { recursive: true })
       }
-      
+
       const filename = `response-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
       const filepath = join(responsesDir, filename)
-      
+
       // Don't log the full base64 image data - just log metadata
+      const responseData = response.data as Array<{ b64_json?: string }> | undefined
       const logData = {
         ...response,
-        data: response.data?.map((d: any) => ({
+        data: responseData?.map((d: { b64_json?: string }) => ({
           ...d,
           b64_json: d.b64_json ? `[base64 image data: ${d.b64_json.length} chars]` : undefined,
         }))

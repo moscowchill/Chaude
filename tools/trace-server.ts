@@ -18,7 +18,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from 'http'
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
-import { join, basename } from 'path'
+import { join } from 'path'
 import { gzipSync } from 'zlib'
 import { ActivationTrace, TraceIndex } from '../src/trace/types.js'
 
@@ -134,16 +134,16 @@ function loadTrace(traceId: string): ActivationTrace | null {
   return null
 }
 
-function loadRequestBody(ref: string): any {
+function loadRequestBody(ref: string): unknown {
   const path = join(LOGS_DIR, 'llm-requests', ref)
   if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  return JSON.parse(readFileSync(path, 'utf-8')) as unknown
 }
 
-function loadResponseBody(ref: string): any {
+function loadResponseBody(ref: string): unknown {
   const path = join(LOGS_DIR, 'llm-responses', ref)
   if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  return JSON.parse(readFileSync(path, 'utf-8')) as unknown
 }
 
 function getChannelName(channelId: string): string {

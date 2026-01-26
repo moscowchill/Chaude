@@ -19,8 +19,41 @@
 
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
-import { LLMProvider, ProviderRequest } from '../middleware.js'
+import { LLMProvider, ProviderRequest, AnthropicContentBlock } from '../middleware.js'
 import { LLMCompletion, ContentBlock, LLMError } from '../../types.js'
+
+// Message content type - can be string or array of content blocks (using AnthropicContentBlock for compatibility with ProviderMessage)
+type MessageContent = string | AnthropicContentBlock[]
+
+// OpenAI Completions API request body
+interface OpenAICompletionsRequestBody {
+  model: string
+  prompt: string
+  max_tokens?: number
+  temperature?: number
+  presence_penalty?: number
+  frequency_penalty?: number
+  stop?: string[]
+}
+
+// OpenAI Completions API response
+interface OpenAICompletionsResponse {
+  id?: string
+  object?: string
+  created?: number
+  model?: string
+  choices?: Array<{
+    text?: string
+    index?: number
+    logprobs?: unknown
+    finish_reason?: string
+  }>
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+  }
+}
 import { logger } from '../../utils/logger.js'
 import { getCurrentTrace } from '../../trace/index.js'
 
@@ -55,7 +88,7 @@ export class OpenAICompletionsProvider implements LLMProvider {
     const prompt = this.buildPrompt(request.messages)
 
     // Build request body for /v1/completions endpoint
-    const body: any = {
+    const body: OpenAICompletionsRequestBody = {
       model: request.model,
       prompt,
       max_tokens: request.max_tokens,
@@ -114,7 +147,7 @@ export class OpenAICompletionsProvider implements LLMProvider {
         throw new Error(`OpenAI Completions API error ${response.status}: ${errorText}`)
       }
 
-      const data = await response.json() as any
+      const data = await response.json() as OpenAICompletionsResponse
 
       // Log response to file
       const responseRef = this.logResponseToFile(data)
@@ -180,7 +213,7 @@ export class OpenAICompletionsProvider implements LLMProvider {
         model: data.model || request.model,
         raw: data,
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Record error to trace
       if (trace && callId) {
         trace.failLLMCall(callId, {
@@ -214,7 +247,7 @@ export class OpenAICompletionsProvider implements LLMProvider {
    * it converts participant messages into "Name: content" format.
    * We just need to concatenate the message contents.
    */
-  private buildPrompt(messages: { role: string; content: string | any[] }[]): string {
+  private buildPrompt(messages: { role: string; content: MessageContent }[]): string {
     const parts: string[] = []
 
     for (const msg of messages) {
@@ -237,14 +270,16 @@ export class OpenAICompletionsProvider implements LLMProvider {
    * Extract text content from a message's content field.
    * Content can be a string or an array of content blocks.
    */
-  private extractText(content: string | any[]): string {
+  private extractText(content: MessageContent): string {
     if (typeof content === 'string') {
       return content
     }
 
     if (Array.isArray(content)) {
       return content
-        .filter(block => block.type === 'text')
+        .filter((block): block is AnthropicContentBlock & { type: 'text'; text: string } =>
+          block.type === 'text' && typeof block.text === 'string'
+        )
         .map(block => block.text)
         .join('\n')
     }
@@ -272,7 +307,7 @@ export class OpenAICompletionsProvider implements LLMProvider {
     }
   }
 
-  private logRequestToFile(params: any): string | undefined {
+  private logRequestToFile(params: unknown): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-requests')
       if (!existsSync(dir)) {
@@ -286,13 +321,13 @@ export class OpenAICompletionsProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(params, null, 2))
       logger.debug({ filename }, 'Logged request to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log request to file')
       return undefined
     }
   }
 
-  private logResponseToFile(response: any): string | undefined {
+  private logResponseToFile(response: unknown): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-responses')
       if (!existsSync(dir)) {
@@ -306,7 +341,7 @@ export class OpenAICompletionsProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(response, null, 2))
       logger.debug({ filename }, 'Logged response to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log response to file')
       return undefined
     }

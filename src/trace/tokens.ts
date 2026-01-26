@@ -24,28 +24,28 @@ export function estimateTokens(text: string): number {
 export function estimateBlockTokens(block: ContentBlock): number {
   switch (block.type) {
     case 'text':
-      return estimateTokens((block as any).text || '')
-    
+      return estimateTokens('text' in block ? (block.text as string) : '')
+
     case 'image':
       // Images are roughly 1000-2000 tokens depending on size
       // Anthropic charges based on image dimensions
       // Rough estimate: 765 tokens for a typical image
       return 1000
-    
+
     case 'tool_use': {
-      const toolBlock = block as any
-      return estimateTokens(toolBlock.name || '') +
-             estimateTokens(JSON.stringify(toolBlock.input || {}))
+      const name = 'name' in block ? (block.name as string) : ''
+      const input = 'input' in block ? block.input : {}
+      return estimateTokens(name) + estimateTokens(JSON.stringify(input || {}))
     }
 
     case 'tool_result': {
-      const resultBlock = block as any
-      const content = typeof resultBlock.content === 'string'
-        ? resultBlock.content
-        : JSON.stringify(resultBlock.content || '')
-      return estimateTokens(content)
+      const content = 'content' in block ? block.content : ''
+      const contentStr = typeof content === 'string'
+        ? content
+        : JSON.stringify(content || '')
+      return estimateTokens(contentStr)
     }
-    
+
     default:
       return 0
   }
@@ -87,7 +87,7 @@ export function estimateSystemTokens(systemPrompt?: string): number {
 export function extractTextContent(msg: ParticipantMessage): string {
   return msg.content
     .filter(b => b.type === 'text')
-    .map(b => (b as any).text || '')
+    .map(b => 'text' in b ? (b.text as string) : '')
     .join(' ')
 }
 

@@ -13,6 +13,7 @@ import {
   fromMembraneResponse,
   type NormalizedRequest,
   type NormalizedResponse,
+  type MembraneContentBlock,
 } from './adapter.js';
 
 // ============================================================================
@@ -88,10 +89,10 @@ export class MembraneProvider implements LLMProvider {
         tools: request.tools,
       };
       
-      // Cast to any because our local types may not exactly match membrane's updated types
-      const response = await this.membrane.complete(normalizedRequest as any);
-      const completion = fromMembraneResponse(response as any);
-      
+      // Cast because our local types may not exactly match membrane's updated types
+      const response = await this.membrane.complete(normalizedRequest as NormalizedRequest);
+      const completion = fromMembraneResponse(response as NormalizedResponse);
+
       // Record to trace
       if (trace && callId) {
         trace.completeLLMCall(
@@ -109,8 +110,8 @@ export class MembraneProvider implements LLMProvider {
             stopReason: completion.stopReason,
             contentBlocks: completion.content.length,
             textLength: completion.content
-              .filter(b => b.type === 'text')
-              .reduce((sum, b) => sum + (b as any).text.length, 0),
+              .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+              .reduce((sum, b) => sum + b.text.length, 0),
             toolUseCount: completion.content
               .filter(b => b.type === 'tool_use')
               .length,
@@ -119,10 +120,10 @@ export class MembraneProvider implements LLMProvider {
           completion.model,
         );
       }
-      
+
       return completion;
-      
-    } catch (error) {
+
+    } catch (error: unknown) {
       if (trace && callId) {
         trace.failLLMCall(callId, {
           message: error instanceof Error ? error.message : String(error),
@@ -132,7 +133,7 @@ export class MembraneProvider implements LLMProvider {
       throw error;
     }
   }
-  
+
   /**
    * Complete a request directly from LLMRequest format
    * 
@@ -145,9 +146,9 @@ export class MembraneProvider implements LLMProvider {
     
     try {
       const normalizedRequest = toMembraneRequest(request);
-      // Cast to any because our local types may not exactly match membrane's updated types
-      const response = await this.membrane.complete(normalizedRequest as any);
-      const completion = fromMembraneResponse(response as any);
+      // Cast because our local types may not exactly match membrane's updated types
+      const response = await this.membrane.complete(normalizedRequest as NormalizedRequest);
+      const completion = fromMembraneResponse(response as NormalizedResponse);
       
       // Record to trace
       if (trace && callId) {
@@ -166,8 +167,8 @@ export class MembraneProvider implements LLMProvider {
             stopReason: completion.stopReason,
             contentBlocks: completion.content.length,
             textLength: completion.content
-              .filter(b => b.type === 'text')
-              .reduce((sum, b) => sum + (b as any).text.length, 0),
+              .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+              .reduce((sum, b) => sum + b.text.length, 0),
             toolUseCount: completion.content
               .filter(b => b.type === 'tool_use')
               .length,
@@ -176,10 +177,10 @@ export class MembraneProvider implements LLMProvider {
           completion.model,
         );
       }
-      
+
       return completion;
-      
-    } catch (error) {
+
+    } catch (error: unknown) {
       if (trace && callId) {
         trace.failLLMCall(callId, {
           message: error instanceof Error ? error.message : String(error),
@@ -189,7 +190,7 @@ export class MembraneProvider implements LLMProvider {
       throw error;
     }
   }
-  
+
   /**
    * Stream a request with tool execution support
    * 
@@ -201,9 +202,9 @@ export class MembraneProvider implements LLMProvider {
     options: StreamOptions = {}
   ): Promise<LLMCompletion> {
     const normalizedRequest = toMembraneRequest(request);
-    
-    // Cast to any because our local types may not exactly match membrane's updated types
-    const response = await this.membrane.stream(normalizedRequest as any, {
+
+    // Cast because our local types may not exactly match membrane's updated types
+    const response = await this.membrane.stream(normalizedRequest as NormalizedRequest, {
       onChunk: options.onChunk,
       onToolCalls: options.onToolCalls,
       onPreToolContent: options.onPreToolContent,
@@ -211,8 +212,8 @@ export class MembraneProvider implements LLMProvider {
       maxToolDepth: options.maxToolDepth ?? 10,
       signal: options.signal,
     });
-    
-    return fromMembraneResponse(response as any);
+
+    return fromMembraneResponse(response as NormalizedResponse);
   }
   
   // ==========================================================================
@@ -221,36 +222,36 @@ export class MembraneProvider implements LLMProvider {
   
   /**
    * Reconstruct NormalizedMessage array from ProviderRequest messages
-   * 
+   *
    * This is a lossy conversion since ProviderRequest uses role-based format.
    * We do our best to reconstruct participant names from content.
    */
   private reconstructMessages(request: ProviderRequest): Array<{
     participant: string;
-    content: Array<{ type: 'text'; text: string } | any>;
+    content: MembraneContentBlock[];
   }> {
     const messages: Array<{
       participant: string;
-      content: Array<{ type: 'text'; text: string } | any>;
+      content: MembraneContentBlock[];
     }> = [];
-    
+
     for (const msg of request.messages) {
       if (msg.role === 'system') {
         // System messages are handled separately
         continue;
       }
-      
-      const participant = msg.role === 'assistant' 
-        ? this.assistantName 
+
+      const participant = msg.role === 'assistant'
+        ? this.assistantName
         : 'User';
-      
-      const content = typeof msg.content === 'string'
+
+      const content: MembraneContentBlock[] = typeof msg.content === 'string'
         ? [{ type: 'text' as const, text: msg.content }]
-        : msg.content;
-      
+        : (msg.content as unknown as MembraneContentBlock[]);
+
       messages.push({ participant, content });
     }
-    
+
     return messages;
   }
   
@@ -268,8 +269,8 @@ export class MembraneProvider implements LLMProvider {
     // Handle array content (Anthropic system format)
     if (Array.isArray(systemMessage.content)) {
       return systemMessage.content
-        .filter((b: any) => b.type === 'text')
-        .map((b: any) => b.text)
+        .filter((b: { type: string }): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
         .join('\n');
     }
     

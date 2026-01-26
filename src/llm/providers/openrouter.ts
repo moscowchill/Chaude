@@ -39,7 +39,7 @@ export class OpenRouterProvider implements LLMProvider {
     const startTime = Date.now()
 
     // Build request body
-    const body: any = {
+    const body: Record<string, unknown> = {
       model: request.model,
       messages: request.messages.map(m => ({
         role: m.role,
@@ -62,7 +62,7 @@ export class OpenRouterProvider implements LLMProvider {
         function: {
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema,
+          parameters: tool.input_schema,
         }
       }))
     }
@@ -97,14 +97,15 @@ export class OpenRouterProvider implements LLMProvider {
         throw new Error(`OpenRouter API error ${response.status}: ${errorText}`)
       }
 
-      const data = await response.json() as any
+      const data = await response.json() as Record<string, unknown>
 
       // Log response to file
       const responseRef = this.logResponseToFile(data)
 
       const durationMs = Date.now() - startTime
-      const choice = data.choices?.[0]
-      const message = choice?.message
+      const choices = data.choices as Array<Record<string, unknown>> | undefined
+      const choice = choices?.[0]
+      const message = choice?.message as Record<string, unknown> | undefined
 
       logger.debug({
         stopReason: choice?.finish_reason,
@@ -118,18 +119,20 @@ export class OpenRouterProvider implements LLMProvider {
 
       // Add text content
       if (message?.content) {
-        content.push({ type: 'text', text: message.content })
+        content.push({ type: 'text', text: message.content as string })
       }
 
       // Add tool calls if present
       if (message?.tool_calls) {
-        for (const toolCall of message.tool_calls) {
+        const toolCalls = message.tool_calls as Array<Record<string, unknown>>
+        for (const toolCall of toolCalls) {
           if (toolCall.type === 'function') {
+            const func = toolCall.function as Record<string, unknown>
             content.push({
               type: 'tool_use',
-              id: toolCall.id,
-              name: toolCall.function.name,
-              input: JSON.parse(toolCall.function.arguments || '{}'),
+              id: toolCall.id as string,
+              name: func.name as string,
+              input: JSON.parse((func.arguments as string) || '{}'),
             })
           }
         }
@@ -137,8 +140,8 @@ export class OpenRouterProvider implements LLMProvider {
 
       // Calculate metrics
       const textLength = content
-        .filter(c => c.type === 'text')
-        .reduce((sum, c) => sum + ((c as any).text?.length || 0), 0)
+        .filter((c): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+        .reduce((sum, c) => sum + (c.text?.length || 0), 0)
       const toolUseCount = content.filter(c => c.type === 'tool_use').length
 
       // Record to trace
@@ -156,16 +159,16 @@ export class OpenRouterProvider implements LLMProvider {
             apiBaseUrl: this.baseUrl,
           },
           {
-            stopReason: this.mapStopReason(choice?.finish_reason),
+            stopReason: this.mapStopReason(choice?.finish_reason as string | undefined),
             contentBlocks: content.length,
             textLength,
             toolUseCount,
           },
           {
-            inputTokens: data.usage?.prompt_tokens || 0,
-            outputTokens: data.usage?.completion_tokens || 0,
+            inputTokens: (data.usage as Record<string, number> | undefined)?.prompt_tokens || 0,
+            outputTokens: (data.usage as Record<string, number> | undefined)?.completion_tokens || 0,
           },
-          data.model || request.model,
+          (data.model as string) || request.model,
           {
             requestBodyRef: requestRef,
             responseBodyRef: responseRef,
@@ -175,15 +178,15 @@ export class OpenRouterProvider implements LLMProvider {
 
       return {
         content,
-        stopReason: this.mapStopReason(choice?.finish_reason),
+        stopReason: this.mapStopReason(choice?.finish_reason as string | undefined),
         usage: {
-          inputTokens: data.usage?.prompt_tokens || 0,
-          outputTokens: data.usage?.completion_tokens || 0,
+          inputTokens: (data.usage as Record<string, number> | undefined)?.prompt_tokens || 0,
+          outputTokens: (data.usage as Record<string, number> | undefined)?.completion_tokens || 0,
         },
-        model: data.model || request.model,
+        model: (data.model as string) || request.model,
         raw: data,
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Record error to trace
       if (trace && callId) {
         trace.failLLMCall(callId, {
@@ -234,19 +237,21 @@ export class OpenRouterProvider implements LLMProvider {
   /**
    * Transform content blocks from internal format to OpenAI format
    */
-  private transformContent(content: string | any[]): string | any[] {
+  private transformContent(content: string | unknown[]): string | unknown[] {
     if (typeof content === 'string') {
       return content
     }
 
     return content.map(block => {
-      if (block.type === 'text') {
-        return { type: 'text', text: block.text }
+      const b = block as Record<string, unknown>
+      if (b.type === 'text') {
+        return { type: 'text', text: b.text }
       }
-      
-      if (block.type === 'image') {
-        const mediaType = block.source?.media_type || 'image/jpeg'
-        const data = block.source?.data || ''
+
+      if (b.type === 'image') {
+        const source = b.source as Record<string, unknown> | undefined
+        const mediaType = source?.media_type || 'image/jpeg'
+        const data = source?.data || ''
         return {
           type: 'image_url',
           image_url: {
@@ -259,7 +264,7 @@ export class OpenRouterProvider implements LLMProvider {
     })
   }
 
-  private logRequestToFile(params: any): string | undefined {
+  private logRequestToFile(params: unknown): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-requests')
       if (!existsSync(dir)) {
@@ -273,13 +278,13 @@ export class OpenRouterProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(params, null, 2))
       logger.debug({ filename }, 'Logged request to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log request to file')
       return undefined
     }
   }
 
-  private logResponseToFile(response: any): string | undefined {
+  private logResponseToFile(response: unknown): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-responses')
       if (!existsSync(dir)) {
@@ -293,7 +298,7 @@ export class OpenRouterProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(response, null, 2))
       logger.debug({ filename }, 'Logged response to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log response to file')
       return undefined
     }

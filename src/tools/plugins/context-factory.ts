@@ -58,8 +58,8 @@ export class PluginContextFactory {
       parentChannelId?: string
       historyOriginChannelId?: string
     },
-    epicReducer?: (state: any, delta: any) => any,
-    pluginConfig?: { state_scope?: 'global' | 'channel' | 'epic' | 'off'; [key: string]: any }
+    epicReducer?: (state: unknown, delta: unknown) => unknown,
+    pluginConfig?: { state_scope?: 'global' | 'channel' | 'epic' | 'off'; [key: string]: unknown }
   ): PluginStateContext {
     const stateManager = this.getStateManager(pluginId)
     const { channelId, currentMessageId } = baseContext
@@ -96,9 +96,10 @@ export class PluginContextFactory {
           case 'global':
             return stateManager.getGlobalState<T>()
           
-          case 'channel':
+          case 'channel': {
             const result = await stateManager.getChannelState<T>(channelId, inheritanceInfo)
             return result.state
+          }
           
           case 'epic':
             if (!epicReducer) {
@@ -110,7 +111,7 @@ export class PluginContextFactory {
               channelId,
               null,  // Get latest state
               messageIdSet,  // Captured from outer scope
-              epicReducer
+              epicReducer as (state: T | null, delta: unknown) => T
             )
           
           default:
@@ -149,7 +150,7 @@ export class PluginContextFactory {
           channelId,
           messageId,
           messageIdSet,  // Captured from outer scope
-          epicReducer
+          epicReducer as (state: T | null, delta: unknown) => T
         )
       },
     }

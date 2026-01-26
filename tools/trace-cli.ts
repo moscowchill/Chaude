@@ -19,10 +19,9 @@
 
 import { readFileSync, existsSync, readdirSync } from 'fs'
 import { join } from 'path'
-import { ActivationTrace, ContextMessageInfo, TraceIndex } from '../src/trace/types.js'
+import { ActivationTrace, TraceIndex } from '../src/trace/types.js'
 
 const TRACE_DIR = process.env.TRACE_DIR || './logs/traces'
-const BODIES_DIR = join(TRACE_DIR, 'bodies')
 const INDEX_FILE = join(TRACE_DIR, 'index.jsonl')
 
 // ============================================================================

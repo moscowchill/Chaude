@@ -4,8 +4,10 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express'
+import type { Server } from 'http'
 import { DiscordConnector } from '../discord/connector.js'
 import { logger } from '../utils/logger.js'
+import type { DiscordMessage, DiscordAttachment, CachedImage } from '../types.js'
 
 export interface ApiConfig {
   port: number
@@ -62,7 +64,7 @@ export interface MessageExportResponse {
 
 export class ApiServer {
   private app = express()
-  private server: any = null
+  private server: Server | null = null
 
   constructor(
     private config: ApiConfig,
@@ -132,32 +134,34 @@ export class ApiServer {
 
         const result = await this.exportMessages(body)
         res.json(result)
-      } catch (error: any) {
+      } catch (error: unknown) {
         logger.error({ error, body: req.body }, 'API error in /api/messages/export')
-        
+
+        const errorMessage = error instanceof Error ? error.message : String(error)
+
         // Map known errors to appropriate status codes
-        if (error.message?.includes('Invalid Discord message URL')) {
-          res.status(400).json({ 
+        if (errorMessage.includes('Invalid Discord message URL')) {
+          res.status(400).json({
             error: 'Bad Request',
-            message: error.message,
+            message: errorMessage,
             details: 'Expected format: https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID'
           })
-        } else if (error.message?.includes('not found') || error.message?.includes('Unknown Message')) {
-          res.status(404).json({ 
+        } else if (errorMessage.includes('not found') || errorMessage.includes('Unknown Message')) {
+          res.status(404).json({
             error: 'Not Found',
-            message: error.message,
+            message: errorMessage,
             details: 'The bot cannot access this channel/message. Check bot permissions.'
           })
-        } else if (error.message?.includes('not accessible') || error.message?.includes('Missing Access')) {
-          res.status(403).json({ 
+        } else if (errorMessage.includes('not accessible') || errorMessage.includes('Missing Access')) {
+          res.status(403).json({
             error: 'Forbidden',
-            message: error.message,
+            message: errorMessage,
             details: 'The bot does not have permission to access this channel.'
           })
         } else {
-          res.status(500).json({ 
+          res.status(500).json({
             error: 'Internal Server Error',
-            message: error.message || 'An unexpected error occurred'
+            message: errorMessage || 'An unexpected error occurred'
           })
         }
       }
@@ -178,19 +182,21 @@ export class ApiServer {
         const guildId = req.query.guildId as string | undefined
         const userInfo = await this.getUserInfo(userId, guildId)
         res.json(userInfo)
-      } catch (error: any) {
+      } catch (error: unknown) {
         logger.error({ error, userId: req.params.userId }, 'API error in /api/users/:userId')
-        
-        if (error.message?.includes('not found') || error.message?.includes('Unknown User')) {
-          res.status(404).json({ 
+
+        const errorMessage = error instanceof Error ? error.message : String(error)
+
+        if (errorMessage.includes('not found') || errorMessage.includes('Unknown User')) {
+          res.status(404).json({
             error: 'Not Found',
             message: `User ${req.params.userId} not found`,
             details: 'The user may not exist or the bot cannot see them.'
           })
         } else {
-          res.status(500).json({ 
+          res.status(500).json({
             error: 'Internal Server Error',
-            message: error.message || 'Failed to fetch user info'
+            message: errorMessage || 'Failed to fetch user info'
           })
         }
       }
@@ -220,18 +226,20 @@ export class ApiServer {
         }
 
         res.json({ avatarUrl })
-      } catch (error: any) {
+      } catch (error: unknown) {
         logger.error({ error, userId: req.params.userId }, 'API error in /api/users/:userId/avatar')
-        
-        if (error.message?.includes('Unknown User')) {
-          res.status(404).json({ 
+
+        const errorMessage = error instanceof Error ? error.message : String(error)
+
+        if (errorMessage.includes('Unknown User')) {
+          res.status(404).json({
             error: 'Not Found',
-            message: error.message
+            message: errorMessage
           })
         } else {
-          res.status(500).json({ 
+          res.status(500).json({
             error: 'Internal Server Error',
-            message: error.message || 'Failed to fetch user avatar'
+            message: errorMessage || 'Failed to fetch user avatar'
           })
         }
       }
@@ -274,19 +282,21 @@ export class ApiServer {
         maxImages,
         ignoreHistory,  // Skip .history processing for raw export
       })
-    } catch (error: any) {
-      if (error.code === 50001) {
+    } catch (error: unknown) {
+      const discordError = error as { code?: number; message?: string }
+      if (discordError.code === 50001) {
         throw new Error(`Missing Access: Bot does not have permission to view channel ${channelId}`)
-      } else if (error.code === 10003) {
+      } else if (discordError.code === 10003) {
         throw new Error(`Channel ${channelId} not found or bot is not a member of this guild`)
-      } else if (error.code === 10008) {
+      } else if (discordError.code === 10008) {
         throw new Error(`Unknown Message: Message not found in channel ${channelId}`)
       }
-      throw new Error(`Failed to fetch messages: ${error.message}`)
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new Error(`Failed to fetch messages: ${errorMessage}`)
     }
     
     let messages = context.messages
-    const imageCache = new Map(context.images.map(img => [img.url, img]))
+    const imageCache = new Map<string, CachedImage>(context.images.map(img => [img.url, img]))
     
     logger.debug({ 
       fetchedMessages: messages.length, 
@@ -330,7 +340,7 @@ export class ApiServer {
     messages = this.mergeConsecutiveBotMessages(messages)
 
     // Transform to export format (from DiscordMessage to API format)
-    const exportedMessages = messages.map((msg: any) => ({
+    const exportedMessages = messages.map((msg: DiscordMessage) => ({
       id: msg.id,
       author: {
         id: msg.author.id,
@@ -342,7 +352,7 @@ export class ApiServer {
       content: msg.content,
       timestamp: msg.timestamp.toISOString(),
       reactions: msg.reactions || [],
-      attachments: msg.attachments.map((att: any) => {
+      attachments: msg.attachments.map((att: DiscordAttachment) => {
         const cached = imageCache.get(att.url)
         return {
           id: att.id,
@@ -370,39 +380,43 @@ export class ApiServer {
     }
   }
 
-  private async getUserInfo(userId: string, guildId?: string): Promise<any> {
-    const client = (this.connector as any).client
-    
+  private async getUserInfo(userId: string, guildId?: string): Promise<Record<string, unknown>> {
+    const client = (this.connector as unknown as { client: Record<string, unknown> }).client as Record<string, unknown>
+
     // Fetch user from Discord
-    let user
+    let user: Record<string, unknown>
     try {
-      user = await client.users.fetch(userId)
-    } catch (error: any) {
-      if (error.code === 10013) {
+      user = await (client.users as { fetch: (id: string) => Promise<Record<string, unknown>> }).fetch(userId)
+    } catch (error: unknown) {
+      const discordError = error as { code?: number }
+      if (discordError.code === 10013) {
         throw new Error(`Unknown User: User ${userId} not found`)
       }
-      throw new Error(`Failed to fetch user: ${error.message}`)
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      throw new Error(`Failed to fetch user: ${errorMessage}`)
     }
-    
+
     if (!user) {
       throw new Error(`Unknown User: User ${userId} not found`)
     }
 
     // Get guild-specific info if guildId provided
-    let displayName = user.username
+    let displayName = user.username as string
     let roles: string[] = []
-    
+
     if (guildId) {
       try {
-        const guild = await client.guilds.fetch(guildId)
-        const member = await guild.members.fetch(userId)
-        displayName = member.displayName || user.username
-        roles = member.roles.cache.map((r: any) => r.name).filter((n: string) => n !== '@everyone')
-      } catch (error: any) {
+        const guild = await (client.guilds as { fetch: (id: string) => Promise<Record<string, unknown>> }).fetch(guildId)
+        const member = await (guild.members as { fetch: (id: string) => Promise<Record<string, unknown>> }).fetch(userId)
+        displayName = (member.displayName as string) || (user.username as string)
+        const roleCache = (member.roles as { cache: { map: (fn: (r: { name: string }) => string) => string[] } }).cache
+        roles = roleCache.map((r: { name: string }) => r.name).filter((n: string) => n !== '@everyone')
+      } catch (error: unknown) {
         logger.warn({ error, userId, guildId }, 'Failed to fetch guild member info')
-        if (error.code === 10004) {
+        const discordError = error as { code?: number }
+        if (discordError.code === 10004) {
           throw new Error(`Guild ${guildId} not found or bot is not a member`)
-        } else if (error.code === 10007) {
+        } else if (discordError.code === 10007) {
           throw new Error(`User ${userId} is not a member of guild ${guildId}`)
         }
         // Don't throw for guild fetch failures - just use global info
@@ -416,23 +430,24 @@ export class ApiServer {
       displayName,
       discriminator: user.discriminator,
       bot: user.bot,
-      avatarUrl: user.displayAvatarURL({ size: 128 }),
+      avatarUrl: (user.displayAvatarURL as (opts: { size: number }) => string)({ size: 128 }),
       roles: guildId ? roles : undefined,
     }
   }
 
   private async getUserAvatar(userId: string, size: number = 128): Promise<string | null> {
-    const client = (this.connector as any).client
-    
+    const client = (this.connector as unknown as { client: Record<string, unknown> }).client as Record<string, unknown>
+
     try {
-      const user = await client.users.fetch(userId)
+      const user = await (client.users as { fetch: (id: string) => Promise<Record<string, unknown>> }).fetch(userId)
       if (!user) {
         throw new Error(`Unknown User: User ${userId} not found`)
       }
 
-      return user.displayAvatarURL({ size, extension: 'png' })
-    } catch (error: any) {
-      if (error.code === 10013) {
+      return (user.displayAvatarURL as (opts: { size: number; extension: string }) => string)({ size, extension: 'png' })
+    } catch (error: unknown) {
+      const discordError = error as { code?: number }
+      if (discordError.code === 10013) {
         throw new Error(`Unknown User: User ${userId} not found`)
       }
       logger.warn({ error, userId }, 'Failed to fetch user avatar')
@@ -440,7 +455,7 @@ export class ApiServer {
     }
   }
 
-  private applyRecencyWindow(messages: any[], window: { messages?: number, characters?: number }): any[] {
+  private applyRecencyWindow(messages: DiscordMessage[], window: { messages?: number, characters?: number }): DiscordMessage[] {
     let result = messages
 
     // Apply message limit
@@ -450,24 +465,24 @@ export class ApiServer {
 
     // Apply character limit
     if (window.characters) {
-      const kept: any[] = []
+      const kept: DiscordMessage[] = []
       let charCount = 0
 
       // Work backwards from most recent
       for (let i = result.length - 1; i >= 0; i--) {
-        const msg = result[i] as any
+        const msg = result[i]
         if (!msg) continue
-        
+
         const msgLength = (msg.content || '').length
-        
+
         if (charCount + msgLength > window.characters && kept.length > 0) {
           break
         }
-        
+
         kept.unshift(msg)
         charCount += msgLength
       }
-      
+
       result = kept
     }
 
@@ -478,11 +493,11 @@ export class ApiServer {
    * Merge consecutive messages from the same bot into a single message
    * This helps with bots that split responses across multiple Discord messages
    */
-  private mergeConsecutiveBotMessages(messages: any[]): any[] {
+  private mergeConsecutiveBotMessages(messages: DiscordMessage[]): DiscordMessage[] {
     if (messages.length === 0) return messages
 
-    const merged: any[] = []
-    let current: any = null
+    const merged: DiscordMessage[] = []
+    let current: (DiscordMessage & { _mergedIds?: string[] }) | null = null
 
     for (const msg of messages) {
       // Only merge bot messages
@@ -506,7 +521,7 @@ export class ApiServer {
         // Merge attachments
         current.attachments = [...(current.attachments || []), ...(msg.attachments || [])]
         // Merge reactions (dedupe by emoji)
-        const existingEmojis = new Set((current.reactions || []).map((r: any) => r.emoji))
+        const existingEmojis = new Set((current.reactions || []).map((r: { emoji: string }) => r.emoji))
         for (const reaction of (msg.reactions || [])) {
           if (!existingEmojis.has(reaction.emoji)) {
             current.reactions = current.reactions || []
@@ -527,9 +542,9 @@ export class ApiServer {
       merged.push(current)
     }
 
-    logger.debug({ 
-      originalCount: messages.length, 
-      mergedCount: merged.length 
+    logger.debug({
+      originalCount: messages.length,
+      mergedCount: merged.length
     }, 'Merged consecutive bot messages')
 
     return merged
@@ -561,8 +576,9 @@ export class ApiServer {
 
   async stop(): Promise<void> {
     if (this.server) {
+      const server = this.server
       return new Promise((resolve) => {
-        this.server.close(() => {
+        server.close(() => {
           logger.info('API server stopped')
           resolve()
         })

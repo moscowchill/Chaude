@@ -5,11 +5,19 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
-import { LLMProvider, ProviderRequest } from '../middleware.js'
-import { LLMCompletion, ContentBlock, LLMError } from '../../types.js'
+import { LLMProvider, ProviderRequest, AnthropicContentBlock } from '../middleware.js'
+import { LLMCompletion, ContentBlock, LLMError, TextContent } from '../../types.js'
 import { logger } from '../../utils/logger.js'
 import { getCurrentTrace } from '../../trace/index.js'
 import { processRequestForLogging } from '../../utils/blob-store.js'
+
+// Extended usage type to include cache tokens (not in base Anthropic types)
+interface AnthropicUsageWithCache {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
+}
 
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
@@ -28,7 +36,7 @@ export class AnthropicProvider implements LLMProvider {
 
       // Extract system messages - preserve cache_control if present
       const systemMsgs = request.messages.filter((m) => m.role === 'system')
-      let systemParam: string | any[] | undefined
+      let systemParam: string | AnthropicContentBlock[] | undefined
       
       if (systemMsgs.length > 0) {
         // Check if any system message has cache_control (array format)
@@ -51,7 +59,7 @@ export class AnthropicProvider implements LLMProvider {
       const nonSystemMessages = request.messages.filter((m) => m.role !== 'system')
 
       // Build request params (some models don't support both temperature and top_p)
-      const params: any = {
+      const params: Record<string, unknown> = {
         model: request.model,
         max_tokens: request.max_tokens,
         system: systemParam,
@@ -75,7 +83,7 @@ export class AnthropicProvider implements LLMProvider {
     try {
       logger.debug({ model: request.model, traceId: trace?.getTraceId() }, 'Calling Anthropic API')
 
-      const response = await this.client.messages.create(params)
+      const response = await this.client.messages.create(params as unknown as Anthropic.MessageCreateParams) as Anthropic.Message
 
       // Log response to file (and get ref for trace)
       const responseRef = this.logResponseToFile(response)
@@ -90,25 +98,25 @@ export class AnthropicProvider implements LLMProvider {
       }, 'Received Anthropic response')
 
       // Parse response
-      const content: ContentBlock[] = response.content.map((block: any) => {
+      const content: ContentBlock[] = response.content.map((block) => {
         if (block.type === 'text') {
-          return { type: 'text', text: block.text }
+          return { type: 'text' as const, text: block.text }
         } else if (block.type === 'tool_use') {
           return {
-            type: 'tool_use',
+            type: 'tool_use' as const,
             id: block.id,
             name: block.name,
-            input: block.input,
+            input: block.input as Record<string, unknown>,
           }
         }
         // Unknown block type, return as text
-        return { type: 'text', text: JSON.stringify(block) }
+        return { type: 'text' as const, text: JSON.stringify(block) }
       })
 
       // Calculate text length for trace
       const textLength = content
-        .filter(c => c.type === 'text')
-        .reduce((sum, c) => sum + ((c as any).text?.length || 0), 0)
+        .filter((c): c is TextContent => c.type === 'text')
+        .reduce((sum, c) => sum + (c.text?.length || 0), 0)
       const toolUseCount = content.filter(c => c.type === 'tool_use').length
 
       // Record to trace
@@ -134,8 +142,8 @@ export class AnthropicProvider implements LLMProvider {
           {
             inputTokens: response.usage.input_tokens,
             outputTokens: response.usage.output_tokens,
-            cacheCreationTokens: (response.usage as any).cache_creation_input_tokens,
-            cacheReadTokens: (response.usage as any).cache_read_input_tokens,
+            cacheCreationTokens: (response.usage as AnthropicUsageWithCache).cache_creation_input_tokens,
+            cacheReadTokens: (response.usage as AnthropicUsageWithCache).cache_read_input_tokens,
           },
           response.model,
           {
@@ -151,13 +159,13 @@ export class AnthropicProvider implements LLMProvider {
         usage: {
           inputTokens: response.usage.input_tokens,
           outputTokens: response.usage.output_tokens,
-          cacheCreationTokens: (response.usage as any).cache_creation_input_tokens,
-          cacheReadTokens: (response.usage as any).cache_read_input_tokens,
+          cacheCreationTokens: (response.usage as AnthropicUsageWithCache).cache_creation_input_tokens,
+          cacheReadTokens: (response.usage as AnthropicUsageWithCache).cache_read_input_tokens,
         },
         model: response.model,
         raw: response,
       }
-    } catch (error) {
+    } catch (error: unknown) {
       // Record error to trace (request body was already logged above)
       if (trace && callId) {
         trace.failLLMCall(callId, {
@@ -209,7 +217,7 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
-  private logRequestToFile(params: any): string | undefined {
+  private logRequestToFile(params: Record<string, unknown>): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-requests')
       if (!existsSync(dir)) {
@@ -226,13 +234,13 @@ export class AnthropicProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(processedParams, null, 2))
       logger.debug({ filename }, 'Logged request to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log request to file')
       return undefined
     }
   }
 
-  private logResponseToFile(response: any): string | undefined {
+  private logResponseToFile(response: unknown): string | undefined {
     try {
       const dir = join(process.cwd(), 'logs', 'llm-responses')
       if (!existsSync(dir)) {
@@ -246,7 +254,7 @@ export class AnthropicProvider implements LLMProvider {
       writeFileSync(filename, JSON.stringify(response, null, 2))
       logger.debug({ filename }, 'Logged response to file')
       return basename
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error }, 'Failed to log response to file')
       return undefined
     }

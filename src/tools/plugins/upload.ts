@@ -148,9 +148,10 @@ const uploadFileTool: PluginTool = {
       const sizeMB = (buffer.length / 1024 / 1024).toFixed(2)
       return `File ready (${finalFilename}, ${sizeMB}MB) but upload not available in this context.`
       
-    } catch (error: any) {
-      logger.error({ error: error.message, url, path }, 'Failed to upload file')
-      return `Error uploading file: ${error.message}`
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error({ error: message, url, path }, 'Failed to upload file')
+      return `Error uploading file: ${message}`
     }
   },
 }

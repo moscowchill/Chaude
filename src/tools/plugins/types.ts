@@ -22,8 +22,8 @@ export interface ToolPlugin {
    */
   onToolExecution?: (
     toolName: string,
-    input: any,
-    result: any,
+    input: unknown,
+    result: unknown,
     context: PluginStateContext
   ) => Promise<void>
   
@@ -34,7 +34,7 @@ export interface ToolPlugin {
    */
   postProcessResult?: (
     toolName: string,
-    input: any,
+    input: unknown,
     result: string,
     context: PluginStateContext
   ) => Promise<string>
@@ -46,15 +46,17 @@ export interface ToolPlugin {
   onInit?: (context: PluginStateContext) => Promise<void>
 }
 
-export interface PluginTool {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface PluginTool<TInput = any, TOutput = any> {
   name: string
   description: string
   inputSchema: {
     type: 'object'
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     properties: Record<string, any>
     required?: string[]
   }
-  handler: (input: any, context: PluginContext) => Promise<any>
+  handler: (input: TInput, context: PluginContext) => Promise<TOutput>
 }
 
 /**
@@ -83,7 +85,8 @@ export interface PluginContext {
   channelId: string
   guildId: string
   currentMessageId: string  // The triggering message
-  config: any  // Current bot config
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  config: any  // Current bot config (BotConfig)
   sendMessage: (content: string) => Promise<string[]>  // Send a message, returns message IDs
   pinMessage: (messageId: string) => Promise<void>  // Pin a message
   uploadFile?: (buffer: Buffer, filename: string, contentType: string, caption?: string) => Promise<string[]>  // Upload a file
@@ -141,6 +144,7 @@ export interface PluginStateContext extends PluginContext {
    */
   pluginConfig?: {
     state_scope?: StateScope
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [key: string]: any
   }
   

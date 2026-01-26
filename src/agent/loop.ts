@@ -8,9 +8,9 @@ import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
-import { LLMMiddleware } from '../llm/middleware.js'
+import { LLMMiddleware, ProviderMessage } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult } from '../types.js'
+import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult, LLMRequest, LLMCompletion, ContentBlock } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -27,8 +27,9 @@ import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.j
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
-// Use any for Membrane type to avoid version mismatch issues between 
+// Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Membrane = any
 
 /**
@@ -283,7 +284,7 @@ export class AgentLoop {
   }> {
     const sentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
-    let orphanedInvisible = ''
+    const orphanedInvisible = ''
     
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i]!
@@ -345,13 +346,13 @@ export class AgentLoop {
     // Handle delete events - remove tool cache entries for deleted bot messages
     for (const event of events) {
       if (event.type === 'delete') {
-        const message = event.data as any
+        const message = event.data as Record<string, unknown>
         // Check if this is one of our bot messages
-        if (message.author?.id === this.botUserId) {
+        if ((message.author as Record<string, unknown>)?.id === this.botUserId) {
           await this.toolSystem.removeEntriesByBotMessageId(
             this.botId,
             event.channelId,
-            message.id
+            message.id as string
           )
         }
       }
@@ -367,27 +368,28 @@ export class AgentLoop {
 
     // Get triggering message ID for tool tracking (prefer non-system messages)
     const triggeringEvent = this.findTriggeringMessageEvent(events)
-    const triggeringMessageId = triggeringEvent?.data?.id
+    const triggeringMessageId = (triggeringEvent?.data as Record<string, unknown> | undefined)?.id as string | undefined
 
     // Check for m command and delete it
-    const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as any)._isMCommand)
+    const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as Record<string, unknown>)._isMCommand)
     if (mCommandEvent) {
-      const message = mCommandEvent.data as any
+      const message = mCommandEvent.data as Record<string, unknown>
       try {
-        await this.connector.deleteMessage(channelId, message.id)
-        logger.info({ 
-          messageId: message.id, 
-          channelId,
-          author: message.author?.username,
-          content: message.content?.substring(0, 50)
-        }, 'Deleted m command message')
-      } catch (error: any) {
-        logger.error({ 
-          error: error.message,
-          code: error.code,
+        await this.connector.deleteMessage(channelId, message.id as string)
+        logger.info({
           messageId: message.id,
           channelId,
-          author: message.author?.username
+          author: (message.author as Record<string, unknown>)?.username,
+          content: (message.content as string)?.substring(0, 50)
+        }, 'Deleted m command message')
+      } catch (error: unknown) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        logger.error({
+          error: err.message,
+          code: (error as Record<string, unknown>)?.code,
+          messageId: message.id,
+          channelId,
+          author: (message.author as Record<string, unknown>)?.username
         }, '⚠️  FAILED TO DELETE m COMMAND MESSAGE - Check bot permissions (needs MANAGE_MESSAGES)')
       }
     }
@@ -508,24 +510,27 @@ export class AgentLoop {
     
     for (const event of events) {
       if (event.type === 'message') {
-        const message = event.data as any
-        const content = message.content?.trim() || ''
-        
-        if ((event.data as any)._isMCommand) {
+        const message = event.data as Record<string, unknown>
+        const content = ((message.content as string) ?? '').trim()
+
+        const msgRef = message.reference as Record<string, unknown> | undefined
+        const msgMentions = message.mentions as { has?: (id: string) => boolean } | undefined
+        const msgAuthor = message.author as Record<string, unknown> | undefined
+        if ((event.data as Record<string, unknown>)._isMCommand) {
           reason = 'm_command'
-        } else if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
+        } else if (msgRef?.messageId && this.botMessageIds.has(msgRef.messageId as string)) {
           reason = 'reply'
-        } else if (this.botUserId && message.mentions?.has(this.botUserId)) {
+        } else if (this.botUserId && msgMentions?.has?.(this.botUserId)) {
           reason = 'mention'
         } else {
           reason = 'random'
         }
-        
+
         triggerEvents.push({
           type: event.type,
-          messageId: message.id,
-          authorId: message.author?.id,
-          authorName: message.author?.username,
+          messageId: message.id as string | undefined,
+          authorId: msgAuthor?.id as string | undefined,
+          authorName: msgAuthor?.username as string | undefined,
           contentPreview: content.slice(0, 100),
         })
       }
@@ -552,7 +557,7 @@ export class AgentLoop {
     triggeringMessageId?: string
   ): Promise<{ status: 'allowed' | 'blocked'; transactionId?: string }> {
     // Load config to check if Soma is enabled
-    let config: any
+    let config: BotConfig | null = null
     try {
       const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
       config = this.configSystem.loadConfig({
@@ -651,12 +656,15 @@ export class AgentLoop {
   private findTriggeringUser(events: Event[]): { id: string; roles?: string[] } | null {
     for (const event of events) {
       if (event.type === 'message') {
-        const message = event.data as any
-        if (message.author && !message.author.bot) {
+        const message = event.data as Record<string, unknown>
+        const author = message.author as Record<string, unknown> | undefined
+        if (author && !author.bot) {
+          const member = message.member as Record<string, unknown> | undefined
+          const rolesCache = (member?.roles as Record<string, unknown>)?.cache as Map<string, unknown> | undefined
           return {
-            id: message.author.id,
-            roles: message.member?.roles?.cache 
-              ? Array.from(message.member.roles.cache.keys())
+            id: author.id as string,
+            roles: rolesCache
+              ? Array.from(rolesCache.keys())
               : [],
           }
         }
@@ -665,7 +673,7 @@ export class AgentLoop {
     return null
   }
 
-  private async replaceMentions(text: string, messages: any[]): Promise<string> {
+  private async replaceMentions(text: string, messages: DiscordMessage[]): Promise<string> {
     // Build username -> user ID mapping from recent messages
     // Use actual username (not displayName) for chapter2 compatibility
     const userMap = new Map<string, string>()
@@ -699,17 +707,17 @@ export class AgentLoop {
     return 'mention'
   }
 
-  private findTriggeringMessageEvent(events: Event[]): (Event & { data: any }) | undefined {
+  private findTriggeringMessageEvent(events: Event[]): Event | undefined {
     return events.find((event) => event.type === 'message' && !this.isSystemDiscordMessage(event.data))
       || events.find((event) => event.type === 'message')
   }
 
-  private isSystemDiscordMessage(message: any): boolean {
+  private isSystemDiscordMessage(message: unknown): boolean {
     // NOTE: Keep this conservative for now. We previously tried to infer
     // system-ness from Discord's type codes, but that misclassified
     // legitimate replies. If we see regressions, revisit the more
     // elaborate version that inspects message.type for non-0/19 values.
-    return Boolean(message?.system)
+    return Boolean((message as Record<string, unknown>)?.system)
   }
 
   private async collectPinnedConfigsWithInheritance(channelId: string, baseConfigs: string[]): Promise<string[]> {
@@ -793,7 +801,7 @@ export class AgentLoop {
 
   private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
     // Load config early for API-only mode check
-    let config: any = null
+    let config: BotConfig | null = null
     try {
       config = this.configSystem.loadConfig({
         botName: this.botId,
@@ -803,20 +811,20 @@ export class AgentLoop {
     } catch {
       // Config will be loaded again below if needed
     }
-    
+
     // Check if API-only mode is enabled
     if (config?.api_only) {
       logger.debug('API-only mode enabled - skipping activation')
       return false
     }
-    
+
     // Check each message event for activation triggers
     for (const event of events) {
       if (event.type !== 'message') {
         continue
       }
 
-      const message = event.data as any
+      const message = event.data as Record<string, unknown>
 
       // Skip Discord system messages (e.g., thread starter notifications)
       if (this.isSystemDiscordMessage(message)) {
@@ -824,22 +832,25 @@ export class AgentLoop {
       }
 
       // Skip bot's own messages
-      if (message.author?.id === this.botUserId) {
+      const author = message.author as Record<string, unknown> | undefined
+      if (author?.id === this.botUserId) {
         continue
       }
 
       // 1. Check for m command FIRST (before mention check)
       // This ensures "m continue <@bot>" gets flagged for deletion
       // Only trigger/delete if addressed to THIS bot (mention or reply)
-      const content = message.content?.trim()
+      const content = (message.content as string | undefined)?.trim()
+      const mentions = message.mentions as { has?: (id: string) => boolean } | undefined
+      const reference = message.reference as Record<string, unknown> | undefined
       if (content?.startsWith('m ')) {
-        const mentionsUs = this.botUserId && message.mentions?.has(this.botUserId)
-        const repliesTo = message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)
-        
+        const mentionsUs = this.botUserId && mentions?.has?.(this.botUserId)
+        const repliesTo = reference?.messageId && this.botMessageIds.has(reference.messageId as string)
+
         if (mentionsUs || repliesTo) {
           logger.debug({ messageId: message.id, command: content, mentionsUs, repliesTo }, 'Activated by m command addressed to us')
           // Store m command event for deletion (only if addressed to us)
-          event.data._isMCommand = true
+          ;(event.data as Record<string, unknown>)._isMCommand = true
           return true
         }
         // m command not addressed to us - ignore
@@ -848,9 +859,10 @@ export class AgentLoop {
       }
 
       // 2. Check for bot mention
-      if (this.botUserId && message.mentions?.has(this.botUserId)) {
+      if (this.botUserId && mentions?.has?.(this.botUserId)) {
         // Check bot reply chain depth to prevent bot loops
-        const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Event.data is typed as unknown but contains Discord.js Message at runtime
+        const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message as any)
         
         // Load config if not already loaded
         if (!config) {
@@ -879,19 +891,19 @@ export class AgentLoop {
           }, 'Bot reply chain depth limit reached, blocking activation')
           
           // Add reaction to indicate chain depth limit reached
-          await this.connector.addReaction(channelId, message.id, config.bot_reply_chain_depth_emote)
+          await this.connector.addReaction(channelId, message.id as string, config.bot_reply_chain_depth_emote)
           continue  // Check next event instead of returning false (might be random activation)
         }
-        
+
         logger.debug({ messageId: message.id, chainDepth }, 'Activated by mention')
         return true
       }
 
       // 3. Check for reply to bot's message (but ignore replies from other bots without mention)
-      if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
+      if (reference?.messageId && this.botMessageIds.has(reference.messageId as string)) {
         // If the replying user is a bot, only activate if they explicitly mentioned us
-        if (message.author?.bot) {
-          logger.debug({ messageId: message.id, author: message.author?.username }, 'Ignoring bot reply without mention')
+        if (author?.bot) {
+          logger.debug({ messageId: message.id, author: author?.username }, 'Ignoring bot reply without mention')
           continue
         }
         logger.debug({ messageId: message.id }, 'Activated by reply')
@@ -985,7 +997,7 @@ export class AgentLoop {
       // Use config values: recency_window + rolling_threshold + buffer for .history commands
       const recencyWindow = preConfig.recency_window_messages || 200
       const rollingBuffer = preConfig.rolling_threshold || 50
-      let fetchDepth = recencyWindow + rollingBuffer + 50  // +50 for .history boundary tolerance
+      const fetchDepth = recencyWindow + rollingBuffer + 50  // +50 for .history boundary tolerance
       
       logger.debug({ 
         recencyWindow, 
@@ -1095,7 +1107,7 @@ export class AgentLoop {
       endProfile('configLoad')
       
       // Record config in trace (for debugging)
-      traceSetConfig(config)
+      traceSetConfig(config as unknown as Record<string, unknown>)
 
       // Initialize MCP servers from config (once per bot)
       if (!this.mcpInitialized && config.mcp_servers && config.mcp_servers.length > 0) {
@@ -1270,7 +1282,7 @@ export class AgentLoop {
 
       // 4e. Gather plugin context injections
       startProfile('pluginInjections')
-      let pluginInjections: ContextInjection[] = []
+      const pluginInjections: ContextInjection[] = []
       const loadedPlugins = this.toolSystem.getLoadedPluginObjects()
       if (loadedPlugins.size > 0) {
         // Create plugin context factory with message IDs
@@ -1419,7 +1431,7 @@ export class AgentLoop {
       }
 
       // 7.6. Check for image content blocks (from image generation models)
-      const imageBlocks = completion.content.filter((c: any) => c.type === 'image')
+      const imageBlocks = completion.content.filter((c: ContentBlock) => c.type === 'image')
       if (imageBlocks.length > 0) {
         logger.info({ imageCount: imageBlocks.length }, 'Completion contains generated images')
         
@@ -1490,13 +1502,13 @@ export class AgentLoop {
       
       // Extract response text for tracing (display text without thinking/tools)
       const responseText = completion.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
+        .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+        .map((c) => c.text)
         .join('\n')
-      
+
       logger.debug({
         contentBlocks: completion.content.length,
-        textBlocks: completion.content.filter((c: any) => c.type === 'text').length,
+        textBlocks: completion.content.filter((c: ContentBlock) => c.type === 'text').length,
         responseLength: responseText.length,
         sentMessageCount: sentMessageIds.length,
         isPhantom: sentMessageIds.length === 0,
@@ -1521,8 +1533,8 @@ export class AgentLoop {
         // Get the full completion text (with thinking and tool calls, before stripping)
         // For inline tool execution, use the preserved fullCompletionText which includes tool calls/results
         const activationCompletionText = fullCompletionText || completion.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
+          .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+          .map((c) => c.text)
           .join('\n')
         
         this.activationStore.addCompletion(
@@ -1648,7 +1660,7 @@ export class AgentLoop {
    * - membrane_shadow_mode: true → run both, log differences, use old result
    * - membrane_shadow_mode: true + use_membrane: true → run both, use membrane result
    */
-  private async completeLLM(request: any, config: BotConfig): Promise<any> {
+  private async completeLLM(request: LLMRequest, config: BotConfig): Promise<LLMCompletion> {
     // Shadow mode: run both paths and compare
     if (config.membrane_shadow_mode && this.membraneProvider) {
       return this.completeLLMWithShadow(request, config)
@@ -1670,12 +1682,12 @@ export class AgentLoop {
    * Useful for validation - ensures parity between old and new paths
    * before fully switching to membrane.
    */
-  private async completeLLMWithShadow(request: any, config: BotConfig): Promise<any> {
+  private async completeLLMWithShadow(request: LLMRequest, config: BotConfig): Promise<LLMCompletion> {
     const model = request.config?.model || 'unknown'
-    
+
     // Run old middleware
     const oldStart = Date.now()
-    let oldResult: any
+    let oldResult: LLMCompletion | undefined
     let oldError: Error | null = null
     try {
       oldResult = await this.llmMiddleware.complete(request)
@@ -1683,10 +1695,10 @@ export class AgentLoop {
       oldError = err instanceof Error ? err : new Error(String(err))
     }
     const oldDuration = Date.now() - oldStart
-    
+
     // Run membrane
     const newStart = Date.now()
-    let newResult: any
+    let newResult: LLMCompletion | undefined
     let newError: Error | null = null
     try {
       newResult = await this.membraneProvider!.completeFromLLMRequest(request)
@@ -1709,20 +1721,20 @@ export class AgentLoop {
     // Return based on use_membrane preference
     if (config.use_membrane) {
       if (newError) throw newError
-      return newResult
+      return newResult!
     } else {
       if (oldError) throw oldError
-      return oldResult
+      return oldResult!
     }
   }
-  
+
   /**
    * Log comparison between old middleware and membrane results
    */
   private logShadowComparison(data: {
     model: string
-    oldResult: any
-    newResult: any
+    oldResult: LLMCompletion | undefined
+    newResult: LLMCompletion | undefined
     oldError: Error | null
     newError: Error | null
     oldDuration: number
@@ -1793,11 +1805,11 @@ export class AgentLoop {
   /**
    * Extract text content from completion result
    */
-  private extractTextFromCompletion(result: any): string {
+  private extractTextFromCompletion(result: LLMCompletion | undefined): string {
     if (!result?.content) return ''
     return result.content
-      .filter((c: any) => c.type === 'text')
-      .map((c: any) => c.text || '')
+      .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text || '')
       .join('')
   }
   
@@ -1832,14 +1844,14 @@ export class AgentLoop {
   private static readonly FUNC_CALLS_CLOSE = '</' + 'function_calls>'
 
   private async executeWithInlineTools(
-    llmRequest: any,
+    llmRequest: LLMRequest,
     config: BotConfig,
     channelId: string,
     triggeringMessageId: string,
     _activationId?: string,
     discordMessages?: DiscordMessage[]  // For post-hoc participant truncation
-  ): Promise<{ 
-    completion: any; 
+  ): Promise<{
+    completion: LLMCompletion;
     toolCallIds: string[]; 
     preambleMessageIds: string[]; 
     fullCompletionText?: string;
@@ -1857,7 +1869,7 @@ export class AgentLoop {
     
     // Track MCP tool result images for injection into continuation requests
     // These accumulate across tool iterations so the model can see all images
-    let pendingToolImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
+    const pendingToolImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
     
     // Check if thinking was actually prefilled (not in continuation mode)
     const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
@@ -1891,7 +1903,7 @@ export class AgentLoop {
 
       // Handle native tool_use in chat mode
       while (completion.stopReason === 'tool_use' && config.mode === 'chat' && toolDepth < maxToolDepth) {
-        const toolUseBlocks = completion.content.filter((c: any) => c.type === 'tool_use')
+        const toolUseBlocks = completion.content.filter((c: ContentBlock): c is ContentBlock & { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => c.type === 'tool_use')
 
         if (toolUseBlocks.length === 0) break
 
@@ -1922,7 +1934,7 @@ export class AgentLoop {
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolBlock.id,
-            content: result.error || result.output || '',
+            content: result.error || String(result.output ?? ''),
           })
 
           toolDepth++
@@ -1937,20 +1949,20 @@ export class AgentLoop {
         const systemPrompt = continuationRequest.system_prompt || config.system_prompt || ''
 
         // Transform participant messages to API format
-        const apiMessages: any[] = []
+        const apiMessages: ProviderMessage[] = []
         if (systemPrompt) {
           apiMessages.push({ role: 'system', content: systemPrompt })
         }
 
         // Convert conversation messages (skip system)
         const srcMessages = continuationRequest.messages || []
-        let buffer: any[] = []
+        let buffer: Array<{ participant: string; text: string }> = []
         const botName = config.name
 
         for (const msg of srcMessages) {
           const isBot = msg.participant === botName
           const text = Array.isArray(msg.content)
-            ? msg.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
+            ? msg.content.filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text').map((c) => c.text).join('\n')
             : (typeof msg.content === 'string' ? msg.content : '')
 
           if (isBot) {
@@ -1970,8 +1982,10 @@ export class AgentLoop {
         }
 
         // Add the assistant's tool_use response and user's tool_result
-        apiMessages.push({ role: 'assistant', content: completion.content })
-        apiMessages.push({ role: 'user', content: toolResults })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ContentBlock[] and tool_result content need to be passed to provider
+        apiMessages.push({ role: 'assistant', content: completion.content as any })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool results need to be passed to provider
+        apiMessages.push({ role: 'user', content: toolResults as any })
 
         // Build continuation request with tool results (direct provider format)
         const toolContinuationRequest = {
@@ -1994,11 +2008,11 @@ export class AgentLoop {
       // Handle stop sequence continuation - only if we're inside an unclosed tag
       if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
         const completionText = completion.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
+          .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+          .map((c) => c.text)
           .join('')
         
-        const triggeredStopSequence = completion.raw?.stop_sequence
+        const triggeredStopSequence = (completion.raw as Record<string, unknown> | undefined)?.stop_sequence as string | undefined
         
         // Check if we're inside an unclosed <function_calls> block
         // If so, the stop sequence might be inside a tool parameter (e.g., a username)
@@ -2043,30 +2057,30 @@ export class AgentLoop {
       
       // Prepend thinking tag if it was actually prefilled
       if (thinkingWasPrefilled && accumulatedOutput === '') {
-        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
-        if (firstTextBlock?.text) {
+        const firstTextBlock = completion.content.find((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+        if (firstTextBlock?.text !== undefined) {
           firstTextBlock.text = '<thinking>' + firstTextBlock.text
         }
       }
-      
+
       // Get new completion text
       const newText = completion.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
+        .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+        .map((c) => c.text)
         .join('')
       
       accumulatedOutput += newText
       
       // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
       if (completion.stopReason === 'stop_sequence' && 
-          completion.raw?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE) {
+          (completion.raw as Record<string, unknown> | undefined)?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE) {
         accumulatedOutput += AgentLoop.FUNC_CALLS_CLOSE
       }
       
       // If we stopped on a participant name (not function_calls), check if we should exit
       // Only exit if we're NOT inside an unclosed function_calls block
       if (completion.stopReason === 'stop_sequence' && 
-          completion.raw?.stop_sequence !== AgentLoop.FUNC_CALLS_CLOSE) {
+          (completion.raw as Record<string, unknown> | undefined)?.stop_sequence !== AgentLoop.FUNC_CALLS_CLOSE) {
         // Check if we're inside an unclosed function_calls block
         const funcCallsOpen = (accumulatedOutput.match(/<function_calls>/g) || []).length
         const funcCallsClose = (accumulatedOutput.match(/<\/function_calls>/g) || []).length
@@ -2075,7 +2089,7 @@ export class AgentLoop {
         if (!insideFunctionCalls) {
           // Not inside a tool call - model was about to hallucinate, exit
           logger.debug({ 
-            stopSequence: completion.raw?.stop_sequence 
+            stopSequence: (completion.raw as Record<string, unknown> | undefined)?.stop_sequence 
           }, 'Stopped on participant name outside function_calls, returning')
           
           return this.finalizeInlineExecution({
@@ -2096,7 +2110,7 @@ export class AgentLoop {
         }
         // Inside function_calls - the stop sequence was in a parameter, continue
         logger.debug({ 
-          stopSequence: completion.raw?.stop_sequence 
+          stopSequence: (completion.raw as Record<string, unknown> | undefined)?.stop_sequence 
         }, 'Stopped on participant name inside function_calls, continuing to parse')
       }
       
@@ -2375,12 +2389,12 @@ export class AgentLoop {
     channelId: string;
     triggeringMessageId: string;
     config: BotConfig;
-    llmRequest: any;
+    llmRequest: LLMRequest;
     discordMessages?: DiscordMessage[];
     suffix?: string;  // e.g., '[Max tool depth reached]'
     stopReason?: string;
   }): Promise<{
-    completion: any;
+    completion: LLMCompletion;
     toolCallIds: string[];
     preambleMessageIds: string[];
     fullCompletionText: string;
@@ -2424,7 +2438,7 @@ export class AgentLoop {
     
     // 4. Parse remaining output into segments
     const suffixText = suffix ? `\n${suffix}` : ''
-    let segments = this.parseIntoSegments(truncatedRemaining + suffixText)
+    const segments = this.parseIntoSegments(truncatedRemaining + suffixText)
     
     // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
     if (discordMessages) {
@@ -2514,7 +2528,7 @@ export class AgentLoop {
     return {
       completion: {
         content: [{ type: 'text', text: displayText + suffixText }],
-        stopReason: (stopReason || 'end_turn') as any,
+        stopReason: (stopReason || 'end_turn') as LLMCompletion['stopReason'],
         usage: { inputTokens: 0, outputTokens: 0 },
         model: '',
       },
@@ -2533,11 +2547,11 @@ export class AgentLoop {
    * since Anthropic only allows images in user messages.
    */
   private buildInlineContinuationRequest(
-    baseRequest: any,
+    baseRequest: LLMRequest,
     accumulatedOutput: string,
     config: BotConfig,
     toolResultImages?: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }>
-  ): any {
+  ): LLMRequest {
     if (!accumulatedOutput && (!toolResultImages || toolResultImages.length === 0)) {
       return baseRequest
     }
@@ -2574,13 +2588,13 @@ export class AgentLoop {
     // These need to be inserted BEFORE the bot's continuation so the model can see them
     // The middleware will handle converting these to proper user turns with images
     if (toolResultImages && toolResultImages.length > 0) {
-      const imageMessages: any[] = []
-      
+      const imageMessages: Array<{ participant: string; content: ContentBlock[] }> = []
+
       for (const { toolName, images } of toolResultImages) {
         if (images.length === 0) continue
-        
+
         // Create image content blocks
-        const imageContent: any[] = [
+        const imageContent: ContentBlock[] = [
           { type: 'text', text: `[Tool result images from ${toolName}]` }
         ]
         
@@ -2625,7 +2639,7 @@ export class AgentLoop {
    * 
    * If it's a continuation, thinking is NOT prefilled.
    */
-  private wasThinkingPrefilled(request: any, config: BotConfig): boolean {
+  private wasThinkingPrefilled(request: LLMRequest, config: BotConfig): boolean {
     // If prefill_thinking is disabled, thinking was never prefilled
     if (!config.prefill_thinking) {
       return false
@@ -2635,25 +2649,25 @@ export class AgentLoop {
     if (messages.length === 0) {
       return false
     }
-    
-    const lastMsg = messages[messages.length - 1]
+
+    const lastMsg = messages[messages.length - 1]!
     const botName = config.name
-    
+
     // If last message is not from the bot, something is wrong
     if (lastMsg.participant !== botName) {
       return false
     }
-    
+
     // Check if last message has content
     const lastContent = lastMsg.content || []
-    const lastHasContent = lastContent.some((c: any) => {
+    const lastHasContent = lastContent.some((c: ContentBlock) => {
       if (c.type === 'text') {
         return c.text && c.text.trim().length > 0
       }
       return false
     })
-    
-    const lastHasToolResult = lastContent.some((c: any) => c.type === 'tool_result')
+
+    const lastHasToolResult = lastContent.some((c: ContentBlock) => c.type === 'tool_result')
     
     if (lastHasContent) {
       // Last message already has content - thinking wasn't prefilled
@@ -2667,24 +2681,24 @@ export class AgentLoop {
     // Track lastNonEmptyParticipant like the middleware does
     let lastNonEmptyParticipant: string | null = null
     for (let i = 0; i < messages.length - 1; i++) {  // Exclude the last (empty) message
-      const msg = messages[i]
+      const msg = messages[i]!
       const content = msg.content || []
-      const hasContent = content.some((c: any) => {
+      const hasContent = content.some((c: ContentBlock) => {
         if (c.type === 'text') return c.text && c.text.trim().length > 0
         return false
       })
-      const hasToolResult = content.some((c: any) => c.type === 'tool_result')
-      
+      const hasToolResult = content.some((c: ContentBlock) => c.type === 'tool_result')
+
       if (hasContent && !hasToolResult) {
         lastNonEmptyParticipant = msg.participant
       }
     }
-    
+
     // Check previous message
     const prevMsg = messages.length >= 2 ? messages[messages.length - 2] : null
     const prevIsBotMessage = prevMsg && prevMsg.participant === botName
     const prevContent = prevMsg?.content || []
-    const prevHasToolResult = prevContent.some((c: any) => c.type === 'tool_result')
+    const prevHasToolResult = prevContent.some((c: ContentBlock) => c.type === 'tool_result')
     
     // Continuation if: lastNonEmptyParticipant was the bot OR prev message is from bot without tool result
     const isContinuation = !lastHasToolResult && (
@@ -2734,36 +2748,36 @@ export class AgentLoop {
    * Appends the stop sequence to the partial completion and continues.
    */
   private async continueCompletionAfterStopSequence(
-    originalRequest: any,
-    partialCompletion: any,
+    originalRequest: LLMRequest,
+    partialCompletion: LLMCompletion,
     stopSequence: string,
     config: BotConfig,
     thinkingWasPrefilled: boolean = false,
     maxContinuations: number = 5
-  ): Promise<any> {
+  ): Promise<LLMCompletion> {
     let accumulatedText = partialCompletion.content
-      .filter((c: any) => c.type === 'text')
-      .map((c: any) => c.text)
+      .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
       .join('')
-    
+
     let continuationCount = 0
     let lastCompletion = partialCompletion
-    
+
     while (continuationCount < maxContinuations) {
       // Append the stop sequence that was triggered
       accumulatedText += stopSequence
-      
+
       // Create a continuation request with accumulated text as prefill
-      const continuationRequest = { ...originalRequest }
-      
+      const continuationRequest: LLMRequest = { ...originalRequest, messages: [...originalRequest.messages] }
+
       // Find and update the last assistant message (the prefill)
       const lastMessage = continuationRequest.messages[continuationRequest.messages.length - 1]
       // Bot's participant name in LLM context is always config.name
       if (lastMessage?.participant === config.name) {
         // Append to existing prefill
         const existingText = lastMessage.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
+          .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+          .map((c) => c.text)
           .join('')
         lastMessage.content = [{ type: 'text', text: existingText + accumulatedText }]
       } else {
@@ -2773,19 +2787,19 @@ export class AgentLoop {
           content: [{ type: 'text', text: accumulatedText }],
         })
       }
-      
-      logger.debug({ 
-        continuationCount: continuationCount + 1, 
+
+      logger.debug({
+        continuationCount: continuationCount + 1,
         accumulatedLength: accumulatedText.length,
-        stopSequence 
+        stopSequence
       }, 'Continuing completion after stop sequence')
-      
+
       const continuation = await this.completeLLM(continuationRequest, config)
-      
+
       // Get continuation text
       const continuationText = continuation.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
+        .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+        .map((c) => c.text)
         .join('')
       
       accumulatedText += continuationText
@@ -2798,7 +2812,7 @@ export class AgentLoop {
         if (!unclosedTag && thinkingWasPrefilled && !accumulatedText.includes('</thinking>')) {
           unclosedTag = 'thinking'
         }
-        const newStopSequence = continuation.raw?.stop_sequence
+        const newStopSequence = (continuation.raw as Record<string, unknown> | undefined)?.stop_sequence as string | undefined
         
         if (unclosedTag && newStopSequence) {
           logger.debug({ unclosedTag, newStopSequence }, 'Still mid-XML-block, continuing again')

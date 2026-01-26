@@ -98,7 +98,7 @@ export interface ImageBlobRef {
  * Extract and store images from message content, replacing with references
  * Returns a new content array with images replaced by blob references
  */
-export function extractAndStoreImages(content: any): any {
+export function extractAndStoreImages(content: unknown): unknown {
   if (!Array.isArray(content)) {
     return content
   }
@@ -150,7 +150,7 @@ export function extractAndStoreImages(content: any): any {
 /**
  * Process messages array, extracting images from all messages
  */
-export function processMessagesForLogging(messages: any[]): any[] {
+export function processMessagesForLogging(messages: Record<string, unknown>[]): Record<string, unknown>[] {
   return messages.map(message => {
     if (Array.isArray(message.content)) {
       return {
@@ -165,11 +165,11 @@ export function processMessagesForLogging(messages: any[]): any[] {
 /**
  * Process system prompt (can be string or array with cache_control)
  */
-export function processSystemForLogging(system: string | any[] | undefined): string | any[] | undefined {
+export function processSystemForLogging(system: string | unknown[] | undefined): string | unknown[] | undefined {
   if (!system) return system
   if (typeof system === 'string') return system
   if (Array.isArray(system)) {
-    return extractAndStoreImages(system)
+    return extractAndStoreImages(system) as unknown[]
   }
   return system
 }
@@ -178,19 +178,19 @@ export function processSystemForLogging(system: string | any[] | undefined): str
  * Process full request params for logging
  * Extracts all images and replaces with blob references
  */
-export function processRequestForLogging(params: any): any {
+export function processRequestForLogging(params: Record<string, unknown>): Record<string, unknown> {
   const processed = { ...params }
-  
+
   // Process messages
-  if (params.messages) {
-    processed.messages = processMessagesForLogging(params.messages)
+  if (params.messages && Array.isArray(params.messages)) {
+    processed.messages = processMessagesForLogging(params.messages as Record<string, unknown>[])
   }
-  
+
   // Process system (Anthropic-style)
   if (params.system) {
-    processed.system = processSystemForLogging(params.system)
+    processed.system = processSystemForLogging(params.system as string | unknown[] | undefined)
   }
-  
+
   return processed
 }
 

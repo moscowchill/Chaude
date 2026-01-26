@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolDefinition, ToolCall, ToolResult, ToolError, MCPServerConfig } from '../types.js'
 import { logger } from '../utils/logger.js'
-import { availablePlugins, PluginTool, PluginContext, ToolPlugin } from './plugins/index.js'
+import { availablePlugins, PluginTool, PluginContext, PluginStateContext, ToolPlugin } from './plugins/index.js'
 
 export class ToolSystem {
   private mcpClients = new Map<string, Client>()
@@ -18,8 +18,8 @@ export class ToolSystem {
   private loadedPlugins: string[] = []
   private loadedPluginObjects = new Map<string, ToolPlugin>()
   private pluginContext: Partial<PluginContext> = {}
-  private pluginContextFactory: any = null  // PluginContextFactory, typed as any to avoid circular import
-  private pluginConfigs: Record<string, any> = {}  // Per-plugin configs
+  private pluginContextFactory: unknown = null  // PluginContextFactory, typed as unknown to avoid circular import
+  private pluginConfigs: Record<string, Record<string, unknown>> = {}  // Per-plugin configs
   private mcpResources = new Map<string, Array<{ uri: string; name: string; description?: string; mimeType?: string }>>()
 
   constructor(private toolCacheDir: string) {}
@@ -84,7 +84,7 @@ export class ToolSystem {
   /**
    * Set plugin context factory for creating plugin-specific state contexts
    */
-  setPluginContextFactory(factory: any, pluginConfigs?: Record<string, any>): void {
+  setPluginContextFactory(factory: unknown, pluginConfigs?: Record<string, Record<string, unknown>>): void {
     this.pluginContextFactory = factory
     this.pluginConfigs = pluginConfigs || {}
   }
@@ -142,7 +142,7 @@ export class ToolSystem {
     const serverTools: ToolDefinition[] = toolResponse.tools.map((tool) => ({
       name: tool.name,
       description: tool.description || '',
-      inputSchema: tool.inputSchema as any,
+      inputSchema: tool.inputSchema as unknown as ToolDefinition['inputSchema'],
       serverName: config.name,
     }))
 
@@ -150,17 +150,17 @@ export class ToolSystem {
     try {
       const resourceResponse = await client.listResources()
       if (resourceResponse.resources && resourceResponse.resources.length > 0) {
-        const resources = resourceResponse.resources.map((r: any) => ({
+        const resources = resourceResponse.resources.map((r) => ({
           uri: r.uri,
           name: r.name,
           description: r.description,
           mimeType: r.mimeType,
         }))
         this.mcpResources.set(config.name, resources)
-        logger.info({ 
-          server: config.name, 
+        logger.info({
+          server: config.name,
           resourceCount: resources.length,
-          resources: resources.map((r: any) => r.name)
+          resources: resources.map((r) => r.name)
         }, 'MCP resources discovered')
       }
     } catch {
@@ -203,14 +203,15 @@ export class ToolSystem {
           try {
             const result = await client.readResource({ uri })
             // Result contains contents array
-            const content = result.contents?.map((c: any) => {
-              if (c.text) return c.text
-              if (c.blob) return `[Binary data: ${c.uri || uri}]`
+            const content = result.contents?.map((c) => {
+              if ('text' in c && c.text) return c.text
+              if ('blob' in c && c.blob) return `[Binary data: ${c.uri || uri}]`
               return JSON.stringify(c)
             }).join('\n') || ''
             return { content, mimeType: resource.mimeType }
-          } catch (e: any) {
-            logger.error({ uri, error: e.message }, 'Failed to read MCP resource')
+          } catch (e: unknown) {
+            const errorMessage = e instanceof Error ? e.message : String(e)
+            logger.error({ uri, error: errorMessage }, 'Failed to read MCP resource')
             return null
           }
         }
@@ -250,10 +251,10 @@ export class ToolSystem {
    *                            Entries with botMessageIds not in this set are filtered out.
    */
   async loadCacheWithResults(
-    botId: string, 
+    botId: string,
     channelId: string,
     existingMessageIds?: Set<string>
-  ): Promise<Array<{call: ToolCall, result: any}>> {
+  ): Promise<Array<{call: ToolCall, result: { output: unknown; images?: unknown }}>> {
     const dirPath = join(this.toolCacheDir, botId, channelId)
 
     if (!existsSync(dirPath)) {
@@ -265,7 +266,7 @@ export class ToolSystem {
     const files = await fs.readdir(dirPath)
     const jsonlFiles = files.filter((f) => f.endsWith('.jsonl')).sort()
 
-    const allEntries: Array<{call: ToolCall, result: any}> = []
+    const allEntries: Array<{call: ToolCall, result: { output: unknown; images?: unknown }}> = []
     let filteredCount = 0
 
     for (const file of jsonlFiles) {
@@ -275,10 +276,14 @@ export class ToolSystem {
         const lines = content.trim().split('\n').filter((l) => l.trim())
 
         for (const line of lines) {
-          const entry = JSON.parse(line)
+          const entry = JSON.parse(line) as {
+            call: { id: string; name: string; input: Record<string, unknown>; messageId: string; originalCompletionText?: string; botMessageIds?: string[] };
+            result: { output: unknown; images?: unknown };
+            timestamp: string;
+          }
           
           // Filter out entries where bot messages were deleted (or missing botMessageIds)
-          const botMsgIds = entry.call.botMessageIds as string[] | undefined
+          const botMsgIds = entry.call.botMessageIds
           if (existingMessageIds) {
             if (!botMsgIds || botMsgIds.length === 0) {
               // Old entry without botMessageIds - skip it (can't verify existence)
@@ -426,20 +431,21 @@ export class ToolSystem {
       
       // Parse parameters - support both <parameter> and <parameter>
       const paramPattern = /<(antml:)?parameter\s+name="([^"]+)">([^<]*)<\/(antml:)?parameter>/g
-      const input: Record<string, any> = {}
+      const input: Record<string, unknown> = {}
       let paramMatch
       
       while ((paramMatch = paramPattern.exec(invokeContent)) !== null) {
         const paramName = paramMatch[2]!  // Group 2 is the name
-        let paramValue: any = paramMatch[3]!  // Group 3 is the value
-        
+        const paramValueStr = paramMatch[3]!  // Group 3 is the value
+
         // Try to parse as JSON, otherwise keep as string
+        let paramValue: unknown = paramValueStr
         try {
-          paramValue = JSON.parse(paramValue)
+          paramValue = JSON.parse(paramValueStr) as unknown
         } catch {
           // Keep as string
         }
-        
+
         input[paramName] = paramValue
       }
       
@@ -602,16 +608,17 @@ export class ToolSystem {
             try {
               // Get plugin-specific config
               const pluginConfig = this.pluginConfigs[pluginName]
-              
+
               // Create a plugin-specific state context
-              const pluginStateContext = this.pluginContextFactory.createStateContext(
+              const factory = this.pluginContextFactory as { createStateContext: (...args: unknown[]) => PluginStateContext }
+              const pluginStateContext = factory.createStateContext(
                 pluginName,
                 context,
                 undefined,  // inheritanceInfo
                 undefined,  // epicReducer
                 pluginConfig
               )
-              
+
               // Call onToolExecution hook
               if (plugin?.onToolExecution) {
                 await plugin.onToolExecution(call.name, call.input, result, pluginStateContext)
@@ -635,11 +642,13 @@ export class ToolSystem {
           output: typeof result === 'string' ? result : JSON.stringify(result),
           timestamp: new Date(),
         }
-      } catch (error: any) {
-        const errorMessage = error?.message || error?.toString() || 'Unknown error'
-        logger.error({ 
-          error: { message: errorMessage, stack: error?.stack, name: error?.name },
-          call 
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        const errorStack = error instanceof Error ? error.stack : undefined
+        const errorName = error instanceof Error ? error.name : undefined
+        logger.error({
+          error: { message: errorMessage, stack: errorStack, name: errorName },
+          call
         }, 'Plugin tool execution failed')
         return {
           callId: call.id,
@@ -863,7 +872,7 @@ export class ToolSystem {
    * - { type: 'image', data: string, mimeType: string }
    * - { type: 'resource', ... } (embedded resources - treated as text)
    */
-  private parseMcpResultContent(content: any): {
+  private parseMcpResultContent(content: unknown): {
     textOutput: string
     images: Array<{ data: string; mimeType: string }>
   } {
@@ -882,33 +891,36 @@ export class ToolSystem {
 
     // Handle array of content blocks (standard MCP format)
     if (Array.isArray(content)) {
-      for (const block of content) {
+      for (const block of content as unknown[]) {
         if (!block || typeof block !== 'object') {
           textParts.push(String(block))
           continue
         }
 
-        if (block.type === 'text' && typeof block.text === 'string') {
-          textParts.push(block.text)
-        } else if (block.type === 'image') {
+        const typedBlock = block as Record<string, unknown>
+        if (typedBlock.type === 'text' && typeof typedBlock.text === 'string') {
+          textParts.push(typedBlock.text)
+        } else if (typedBlock.type === 'image') {
           // MCP image content block
-          const data = block.data || block.source?.data
-          const mimeType = block.mimeType || block.source?.media_type || 'image/png'
+          const source = typedBlock.source as Record<string, unknown> | undefined
+          const data = (typedBlock.data || source?.data) as string | undefined
+          const mimeType = (typedBlock.mimeType || source?.media_type || 'image/png') as string
           if (data) {
             images.push({ data, mimeType })
             logger.debug({ mimeType, dataLength: data.length }, 'Extracted image from MCP tool result')
           }
-        } else if (block.type === 'resource') {
+        } else if (typedBlock.type === 'resource') {
           // Embedded resource - extract text if available
-          if (block.resource?.text) {
-            textParts.push(block.resource.text)
-          } else if (block.resource?.blob) {
+          const resource = typedBlock.resource as Record<string, unknown> | undefined
+          if (resource?.text && typeof resource.text === 'string') {
+            textParts.push(resource.text)
+          } else if (resource?.blob) {
             // Binary resource - just note its presence
-            textParts.push(`[Binary resource: ${block.resource.uri || 'unknown'}]`)
+            textParts.push(`[Binary resource: ${resource.uri || 'unknown'}]`)
           }
         } else {
           // Unknown block type - stringify it
-          textParts.push(JSON.stringify(block))
+          textParts.push(JSON.stringify(typedBlock))
         }
       }
     } else {

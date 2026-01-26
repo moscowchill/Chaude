@@ -58,20 +58,23 @@ const activationLoggers = new Map<string, { logger: pino.Logger, stream: NodeJS.
 export const logger = new Proxy(baseLogger, {
   get(target, prop: string) {
     if (['trace', 'debug', 'info', 'warn', 'error', 'fatal'].includes(prop)) {
-      return (...args: any[]) => {
+      return (...args: unknown[]) => {
         // Log to console
-        (target as any)[prop](...args)
-        
+        const logMethod = target[prop as keyof typeof target] as ((...args: unknown[]) => void)
+        logMethod(...args)
+
         // Log to file - check async context first
         const context = activationContext.getStore()
         if (context?.logger) {
           // Inside activation - log to activation file
-          (context.logger as any)[prop](...args)
+          const activationLogMethod = context.logger[prop as keyof typeof context.logger] as ((...args: unknown[]) => void)
+          activationLogMethod(...args)
         } else {
           // Outside activation - log to general file
-          (generalFileLogger as any)[prop](...args)
+          const fileLogMethod = generalFileLogger[prop as keyof typeof generalFileLogger] as ((...args: unknown[]) => void)
+          fileLogMethod(...args)
         }
-        
+
         // Also capture to trace if we're inside an activation
         const trace = getCurrentTrace()
         if (trace) {
@@ -79,19 +82,19 @@ export const logger = new Proxy(baseLogger, {
           // pino allows: logger.info(obj, msg) or logger.info(msg)
           let message: string
           let data: Record<string, unknown> | undefined
-          
+
           if (typeof args[0] === 'object' && args[0] !== null) {
             data = args[0] as Record<string, unknown>
-            message = args[1] || ''
+            message = String(args[1] || '')
           } else {
             message = String(args[0] || '')
           }
-          
+
           traceLog(prop as LogEntry['level'], message, data)
         }
       }
     }
-    return (target as any)[prop]
+    return target[prop as keyof typeof target]
   }
 })
 
@@ -149,7 +152,7 @@ export function stopActivationLogging(): void {
 /**
  * Create a child logger with additional context
  */
-export function createLogger(context: Record<string, any>) {
+export function createLogger(context: Record<string, unknown>) {
   return logger.child(context)
 }
 

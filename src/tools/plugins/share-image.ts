@@ -83,9 +83,10 @@ const shareImageTool: PluginTool = {
       await context.uploadFile(buffer, filename, image.mimeType, fullCaption)
       
       return `Successfully shared image ${index} to Discord.`
-    } catch (error: any) {
-      logger.error({ error: error.message, index }, 'Failed to share image')
-      return `Error sharing image: ${error.message}`
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error({ error: message, index }, 'Failed to share image')
+      return `Error sharing image: ${message}`
     }
   },
 }
@@ -98,7 +99,7 @@ const listVisibleImagesTool: PluginTool = {
     properties: {},
     required: [],
   },
-  handler: async (_input: any, context: PluginContext): Promise<string> => {
+  handler: async (_input: unknown, context: PluginContext): Promise<string> => {
     const visibleImages = context.visibleImages || []
 
     if (visibleImages.length === 0) {

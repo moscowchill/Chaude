@@ -70,7 +70,7 @@ export interface ToolUseContent {
   type: 'tool_use'
   id: string
   name: string
-  input: Record<string, any>
+  input: Record<string, unknown>
 }
 
 export interface ToolResultContent {
@@ -97,7 +97,7 @@ export interface LLMCompletion {
   stopReason: StopReason
   usage: UsageInfo
   model: string
-  raw?: any  // Optional: raw provider response for debugging
+  raw?: unknown  // Optional: raw provider response for debugging
 }
 
 export type StopReason = 
@@ -259,7 +259,7 @@ export interface PluginInstanceConfig {
   /** State scope: 'global', 'channel', 'epic', or 'off' to disable the plugin */
   state_scope?: 'global' | 'channel' | 'epic' | 'off'
   /** Any other plugin-specific settings */
-  [key: string]: any
+  [key: string]: unknown
 }
 
 // ============================================================================
@@ -311,7 +311,7 @@ export interface ToolDefinition {
 export interface ToolCall {
   id: string
   name: string
-  input: Record<string, any>
+  input: Record<string, unknown>
   messageId: string  // For pruning old calls (triggering user message)
   timestamp: Date
   originalCompletionText: string  // The bot's original text including XML tool call
@@ -325,7 +325,7 @@ export interface ToolCallWithResult {
 
 export interface ToolResult {
   callId: string
-  output: any
+  output: unknown
   /** Image content blocks returned from MCP tools (base64 encoded) */
   images?: Array<{
     data: string      // base64 encoded image data
@@ -344,8 +344,8 @@ export interface JSONSchema {
   items?: JSONSchema
   required?: string[]
   description?: string
-  enum?: any[]
-  [key: string]: any
+  enum?: unknown[]
+  [key: string]: unknown
 }
 
 // ============================================================================
@@ -432,7 +432,7 @@ export interface Event {
   type: EventType
   channelId: string
   guildId: string
-  data: any
+  data: unknown
   timestamp: Date
 }
 
@@ -467,7 +467,7 @@ export class Chapter3Error extends Error {
   constructor(
     message: string,
     public readonly code: string,
-    public readonly details?: any
+    public readonly details?: unknown
   ) {
     super(message)
     this.name = 'Chapter3Error'
@@ -475,28 +475,28 @@ export class Chapter3Error extends Error {
 }
 
 export class ConfigError extends Chapter3Error {
-  constructor(message: string, details?: any) {
+  constructor(message: string, details?: unknown) {
     super(message, 'CONFIG_ERROR', details)
     this.name = 'ConfigError'
   }
 }
 
 export class DiscordError extends Chapter3Error {
-  constructor(message: string, details?: any) {
+  constructor(message: string, details?: unknown) {
     super(message, 'DISCORD_ERROR', details)
     this.name = 'DiscordError'
   }
 }
 
 export class LLMError extends Chapter3Error {
-  constructor(message: string, details?: any) {
+  constructor(message: string, details?: unknown) {
     super(message, 'LLM_ERROR', details)
     this.name = 'LLMError'
   }
 }
 
 export class ToolError extends Chapter3Error {
-  constructor(message: string, details?: any) {
+  constructor(message: string, details?: unknown) {
     super(message, 'TOOL_ERROR', details)
     this.name = 'ToolError'
   }

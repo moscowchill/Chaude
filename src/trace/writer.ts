@@ -40,7 +40,7 @@ export class TraceWriter {
   /**
    * Write a complete trace to disk
    */
-  writeTrace(trace: ActivationTrace, requestBodies?: any[], responseBodies?: any[], channelName?: string): string {
+  writeTrace(trace: ActivationTrace, requestBodies?: unknown[], responseBodies?: unknown[], channelName?: string): string {
     const timestamp = trace.timestamp.toISOString().replace(/[:.]/g, '-')
     
     // Organize traces by bot name
@@ -146,23 +146,23 @@ export class TraceWriter {
   /**
    * Load full request body for an LLM call
    */
-  loadRequestBody(bodyRef: string): any {
+  loadRequestBody(bodyRef: string): unknown {
     const filepath = join(BODIES_DIR, bodyRef)
     if (!existsSync(filepath)) {
       return null
     }
-    return JSON.parse(readFileSync(filepath, 'utf-8'))
+    return JSON.parse(readFileSync(filepath, 'utf-8')) as unknown
   }
-  
+
   /**
    * Load full response body for an LLM call
    */
-  loadResponseBody(bodyRef: string): any {
+  loadResponseBody(bodyRef: string): unknown {
     const filepath = join(BODIES_DIR, bodyRef)
     if (!existsSync(filepath)) {
       return null
     }
-    return JSON.parse(readFileSync(filepath, 'utf-8'))
+    return JSON.parse(readFileSync(filepath, 'utf-8')) as unknown
   }
   
   /**

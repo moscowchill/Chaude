@@ -222,7 +222,7 @@ export class DiscordConnector {
         logger.debug('Skipping parent context fetch - .history cleared context')
       } else if (channel.isThread()) {
         startProfile('threadParentFetch')
-        const thread = channel as any  // Discord.js ThreadChannel
+        const thread = channel as unknown as { id: string; parent: TextChannel }  // Discord.js ThreadChannel
         const parentChannel = thread.parent as TextChannel
         const threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
         
@@ -400,7 +400,7 @@ export class DiscordConnector {
       // Build inheritance info for plugin state
       const inheritanceInfo: DiscordContext['inheritanceInfo'] = {}
       if (channel.isThread()) {
-        const thread = channel as any
+        const thread = channel as unknown as { parentId?: string }
         inheritanceInfo.parentChannelId = thread.parentId
       }
       if (this.lastHistoryOriginChannelId) {
@@ -501,7 +501,7 @@ export class DiscordConnector {
     
     while (results.length < maxMessages && !foundHistory) {
       // Fetch a batch
-      const fetchOptions: any = { limit: Math.min(batchSize, maxMessages - results.length) }
+      const fetchOptions: { limit: number; before?: string } = { limit: Math.min(batchSize, maxMessages - results.length) }
       if (currentBefore) {
         fetchOptions.before = currentBefore
       }
@@ -514,7 +514,7 @@ export class DiscordConnector {
         isFirstBatch
       }, 'Fetching batch in while loop')
 
-      const fetched = await channel.messages.fetch(fetchOptions) as any
+      const fetched = await channel.messages.fetch(fetchOptions)
       
       logger.debug({ fetchedSize: fetched?.size || 0 }, 'Batch fetched')
       
@@ -543,7 +543,7 @@ export class DiscordConnector {
 
       // Process each message in batch
       for (const msg of batchMessages) {
-        const message = msg as any
+        const message = msg as Message
 
         /*logger.debug({ 
           messageId: message.id, 
@@ -568,7 +568,7 @@ export class DiscordConnector {
           if (authorizedRoles && authorizedRoles.length > 0) {
             const member = message.member
             if (member) {
-              const memberRoles = member.roles.cache.map((r: any) => r.name)
+              const memberRoles = member.roles.cache.map((r) => r.name)
               authorized = authorizedRoles.some((role: string) => memberRoles.includes(role))
             } else {
               authorized = false
@@ -591,19 +591,19 @@ export class DiscordConnector {
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
-                hadPendingNewerMessages: !!(this as any)[pendingKey],
+                hadPendingNewerMessages: !!(this as unknown as Record<string, Message[]>)[pendingKey],
               }, 'Empty .history command - keeping newer messages, discarding older')
               this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
               
               // If we previously processed a .history range in this batch, the historical
               // messages it fetched are now in `results`. Since this .history clear is
               // NEWER than that range, we need to discard those historical messages too.
-              if ((this as any)[pendingKey]) {
+              if ((this as unknown as Record<string, Message[]>)[pendingKey]) {
                 // pendingKey has the ACTUAL newer messages we want to keep
                 // results has historical messages that should be discarded
                 results.length = 0
-                results.push(...(this as any)[pendingKey])
-                delete (this as any)[pendingKey]
+                results.push(...((this as unknown as Record<string, Message[]>)[pendingKey] || []))
+                delete (this as unknown as Record<string, Message[]>)[pendingKey]
                 logger.debug({
                   restoredCount: results.length,
                 }, 'Restored newer messages after .history clear overrode earlier .history range')
@@ -669,7 +669,7 @@ export class DiscordConnector {
                 results.push(...historicalMessages)
                 
                 // Store newer messages to append after we collect batch-after-history
-                ;(this as any)[pendingKey] = newerMessages
+                ;(this as unknown as Record<string, Message[]>)[pendingKey] = newerMessages
                 
                 // Clear batchResults - we don't want messages BEFORE .history
                 // Only keep messages AFTER .history in the current channel
@@ -702,8 +702,8 @@ export class DiscordConnector {
         results.push(...batchResults)
         
         // Append previously collected newer messages (batches processed before finding .history)
-        const newerMessages = (this as any)[pendingKey] || []
-        delete (this as any)[pendingKey]
+        const newerMessages = ((this as unknown as Record<string, Message[]>)[pendingKey]) || []
+        delete (this as unknown as Record<string, Message[]>)[pendingKey]
         
         if (newerMessages.length > 0) {
           results.push(...newerMessages)
@@ -731,7 +731,7 @@ export class DiscordConnector {
       }
 
       // Move to next batch (oldest message in current batch)
-      const oldestMsg = batchMessages[0] as any
+      const oldestMsg = batchMessages[0] as Message | undefined
       if (!oldestMsg) break
       currentBefore = oldestMsg.id
     }
@@ -833,11 +833,11 @@ export class DiscordConnector {
    */
   async getParentChannelId(channelId: string): Promise<string | undefined> {
     try {
-      const channel: any = await this.client.channels.fetch(channelId)
-      if (channel?.isThread?.()) {
-        return channel.parentId || undefined
+      const channel = await this.client.channels.fetch(channelId)
+      if (channel && 'isThread' in channel && typeof channel.isThread === 'function' && channel.isThread()) {
+        return (channel as unknown as { parentId?: string }).parentId || undefined
       }
-    } catch (error) {
+    } catch (error: unknown) {
       logger.warn({ error, channelId }, 'Failed to resolve parent channel')
     }
     return undefined
@@ -942,17 +942,18 @@ export class DiscordConnector {
 
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i]!
-        const options: any = {}
-        
+        const options: { reply?: { messageReference: string } } = {}
+
         // First chunk replies to the triggering message
         if (i === 0 && replyToMessageId) {
           try {
             options.reply = { messageReference: replyToMessageId }
             const sent = await channel.send({ content: chunk, ...options })
             messageIds.push(sent.id)
-          } catch (error: any) {
+          } catch (error: unknown) {
             // If reply fails (message deleted), send without reply
-            if (error.code === 10008 || error.message?.includes('Unknown message')) {
+            const discordError = error as { code?: number; message?: string }
+            if (discordError.code === 10008 || discordError.message?.includes('Unknown message')) {
               logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
               const sent = await channel.send({ content: chunk })
               messageIds.push(sent.id)
@@ -991,7 +992,7 @@ export class DiscordConnector {
       // Resolve <@username> mentions to <@USER_ID> format
       const resolvedContent = await this.resolveMentions(content, channelId)
 
-      const options: any = {
+      const options: { content: string; files: { name: string; attachment: Buffer }[]; reply?: { messageReference: string } } = {
         content: resolvedContent,
         files: [{
           name: attachment.name,
@@ -1005,9 +1006,10 @@ export class DiscordConnector {
           const sent = await channel.send(options)
           logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
           return [sent.id]
-        } catch (error: any) {
+        } catch (error: unknown) {
           // If reply fails (message deleted), send without reply
-          if (error.code === 10008 || error.message?.includes('Unknown message')) {
+          const discordError = error as { code?: number; message?: string }
+          if (discordError.code === 10008 || discordError.message?.includes('Unknown message')) {
             logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
             delete options.reply
             const sent = await channel.send(options)
@@ -1053,7 +1055,7 @@ export class DiscordConnector {
       const ext = extMap[mediaType] || 'png'
       const filename = `generated_${Date.now()}.${ext}`
 
-      const options: any = {
+      const options: { content: string; files: { name: string; attachment: Buffer }[]; reply?: { messageReference: string } } = {
         content: caption || '',
         files: [{
           name: filename,
@@ -1067,9 +1069,10 @@ export class DiscordConnector {
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
           return [sent.id]
-        } catch (error: any) {
+        } catch (error: unknown) {
           // If reply fails (message deleted), send without reply
-          if (error.code === 10008 || error.message?.includes('Unknown message')) {
+          const discordError = error as { code?: number; message?: string }
+          if (discordError.code === 10008 || discordError.message?.includes('Unknown message')) {
             logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
             delete options.reply
             const sent = await channel.send(options)
@@ -1108,7 +1111,7 @@ export class DiscordConnector {
 
       const resolvedCaption = caption ? await this.resolveMentions(caption, channelId) : ''
 
-      const options: any = {
+      const options: { content: string; files: { name: string; attachment: Buffer }[]; reply?: { messageReference: string } } = {
         content: resolvedCaption,
         files: [{
           name: filename,
@@ -1122,9 +1125,10 @@ export class DiscordConnector {
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
           return [sent.id]
-        } catch (error: any) {
+        } catch (error: unknown) {
           // If reply fails (message deleted), send without reply
-          if (error.code === 10008 || error.message?.includes('Unknown message')) {
+          const discordError = error as { code?: number; message?: string }
+          if (discordError.code === 10008 || discordError.message?.includes('Unknown message')) {
             logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
             delete options.reply
             const sent = await channel.send(options)
@@ -1160,8 +1164,8 @@ export class DiscordConnector {
 
       try {
       // Get or create webhook for this channel
-        const webhooks = await (channel as any).fetchWebhooks()
-      let webhook = webhooks.find((wh: any) => wh.name === 'Chapter3-Tools')
+        const webhooks = await channel.fetchWebhooks()
+      let webhook = webhooks.find((wh) => wh.name === 'Chapter3-Tools')
 
       if (!webhook) {
         webhook = await channel.createWebhook({
@@ -1179,10 +1183,11 @@ export class DiscordConnector {
       })
 
       logger.debug({ channelId, username }, 'Sent webhook message')
-      } catch (error: any) {
+      } catch (error: unknown) {
         // Threads and some channel types don't support webhooks
         // Fall back to regular message
-        logger.warn({ channelId, error: error.message }, 'Webhook failed, falling back to regular message')
+        const discordError = error as { message?: string }
+        logger.warn({ channelId, error: discordError.message }, 'Webhook failed, falling back to regular message')
         await this.sendMessage(channelId, content)
       }
     }, this.options.maxBackoffMs)
@@ -1259,12 +1264,13 @@ export class DiscordConnector {
         
         await message.delete()
         logger.info({ channelId, messageId, author: message.author?.username }, 'Successfully deleted m command message')
-      } catch (error: any) {
-        logger.error({ 
-          error: error.message, 
-          code: error.code,
-          channelId, 
-          messageId 
+      } catch (error: unknown) {
+        const discordError = error as { message?: string; code?: number }
+        logger.error({
+          error: discordError.message,
+          code: discordError.code,
+          channelId,
+          messageId
         }, 'Failed to delete message')
         throw error
       }
@@ -1277,7 +1283,7 @@ export class DiscordConnector {
    * Consecutive messages from the same bot author count as one logical message.
    * Returns the number of logical bot message groups leading up to this message.
    */
-  async getBotReplyChainDepth(channelId: string, message: any): Promise<number> {
+  async getBotReplyChainDepth(channelId: string, message: Message): Promise<number> {
     let depth = 0
     let currentMessage = message
     let lastBotAuthorId: string | null = null
