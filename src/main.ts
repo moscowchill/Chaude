@@ -62,19 +62,23 @@ async function main() {
     const toolsPath = process.env.TOOLS_PATH || './tools'
     const cachePath = process.env.CACHE_PATH || './cache'
 
-    // Read Discord token from file
-    let discordToken: string
-    
-    try {
-      discordToken = readFileSync(tokenFilePath, 'utf-8').trim()
-      logger.info({ tokenFile: tokenFilePath }, 'Discord token loaded from file')
-    } catch (error) {
-      logger.error({ error, tokenFile: tokenFilePath }, 'Failed to read discord_token file')
-      throw new Error(`Could not read token file: ${tokenFilePath}. Please create it with your bot token.`)
+    // Read Discord token from env var or file
+    let discordToken: string | undefined = process.env.DISCORD_TOKEN
+
+    if (discordToken) {
+      logger.info('Discord token loaded from DISCORD_TOKEN env var')
+    } else {
+      try {
+        discordToken = readFileSync(tokenFilePath, 'utf-8').trim()
+        logger.info({ tokenFile: tokenFilePath }, 'Discord token loaded from file')
+      } catch (error) {
+        logger.error({ error, tokenFile: tokenFilePath }, 'Failed to read discord_token file')
+        throw new Error(`Could not read token file: ${tokenFilePath}. Set DISCORD_TOKEN env var or create the file.`)
+      }
     }
 
     if (!discordToken) {
-      throw new Error('discord_token file is empty')
+      throw new Error('Discord token is empty (check DISCORD_TOKEN env var or token file)')
     }
 
     logger.info({ configPath, toolsPath, cachePath, emsMode: !!emsPath }, 'Configuration loaded')
@@ -92,35 +96,32 @@ async function main() {
     llmMiddleware.setVendorConfigs(vendorConfigs)
 
     // Register providers for each vendor
+    // API keys can come from yaml config or env vars (env vars take precedence)
     for (const [vendorName, vendorConfig] of Object.entries(vendorConfigs)) {
-      const config = vendorConfig.config
-      
+      const config = vendorConfig.config ?? {}
+
       // Anthropic provider
-      if (config?.anthropic_api_key) {
-        const provider = new AnthropicProvider(config.anthropic_api_key)
-        // Register with vendor name so middleware can route correctly
+      const anthropicKey = process.env.ANTHROPIC_API_KEY || config.anthropic_api_key
+      if (anthropicKey) {
+        const provider = new AnthropicProvider(anthropicKey)
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName }, 'Registered Anthropic provider')
       }
-      
+
       // OpenAI-compatible provider (chat completions)
-      if (config?.openai_api_key) {
-        const baseUrl = config.openai_base_url || config.api_base
-        if (!baseUrl) {
-          logger.warn({ vendorName }, 'Skipping OpenAI vendor without api_base')
-          continue
-        }
+      const openaiKey = process.env.OPENAI_API_KEY || config.openai_api_key
+      if (openaiKey) {
+        const baseUrl = config.openai_base_url || config.api_base || 'https://api.openai.com/v1'
         const provider = new OpenAIProvider({
-          apiKey: config.openai_api_key,
+          apiKey: openaiKey,
           baseUrl,
         })
-        // Register with vendor name so middleware can route correctly
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName, baseUrl }, 'Registered OpenAI provider')
       }
-      
+
       // OpenAI Completions provider (base models - /v1/completions endpoint)
-      if (config?.openai_completions_api_key) {
+      if (config.openai_completions_api_key) {
         const baseUrl = config.openai_completions_base_url || config.openai_base_url || config.api_base
         if (!baseUrl) {
           logger.warn({ vendorName }, 'Skipping OpenAI Completions vendor without base_url')
@@ -130,31 +131,29 @@ async function main() {
           apiKey: config.openai_completions_api_key,
           baseUrl,
         })
-        // Register with vendor name so middleware can route correctly
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName, baseUrl }, 'Registered OpenAI Completions provider (base model)')
       }
-      
+
       // OpenRouter provider (supports prefill for compatible models like Claude)
-      if (config?.openrouter_api_key) {
+      const openrouterKey = process.env.OPENROUTER_API_KEY || config.openrouter_api_key
+      if (openrouterKey) {
         const baseUrl = config.openrouter_base_url || 'https://openrouter.ai/api/v1'
         const provider = new OpenRouterProvider({
-          apiKey: config.openrouter_api_key,
+          apiKey: openrouterKey,
           baseUrl,
         })
-        // Register with vendor name so middleware can route correctly
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName, baseUrl }, 'Registered OpenRouter provider')
       }
-      
+
       // OpenAI Image provider (for gpt-image-1, gpt-image-1.5, gpt-image-1-mini models)
-      if (config?.openai_image_api_key) {
+      if (config.openai_image_api_key) {
         const baseUrl = config.openai_image_base_url || config.openai_base_url || 'https://api.openai.com/v1'
         const provider = new OpenAIImageProvider({
           apiKey: config.openai_image_api_key,
           baseUrl,
         })
-        // Register with vendor name so middleware can route correctly
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName, baseUrl }, 'Registered OpenAI Image provider')
       }

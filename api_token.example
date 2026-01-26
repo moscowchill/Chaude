@@ -1,5 +1,0 @@
-# API Bearer Token
-# Generate a secure random token for API authentication
-# Example: openssl rand -hex 32
-your-secure-api-token-here
-

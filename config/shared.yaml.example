@@ -1,53 +1,39 @@
 # Shared configuration for all bots
-# Rename to shared.yaml and fill in your API keys
+# API keys should be set in .env file, not here
+# Rename to shared.yaml
 
 vendors:
   anthropic:
-    config:
-      anthropic_api_key: "sk-ant-api03-..."
+    # Uses ANTHROPIC_API_KEY env var
     provides:
       - "claude-3-5-sonnet-20241022"
       - "claude-3-opus-20240229"
       - "claude-3-5-haiku-20241022"
-  
+
   # aws-bedrock:
-  #   config:
-  #     aws_access_key: "AKIA..."
-  #     aws_secret_key: "..."
-  #     aws_region: "us-west-2"
+  #   # Uses AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION env vars
   #   provides:
   #     - "anthropic\\.claude.*"
-  
-  # OpenAI direct API (for GPT, o1, o3, etc.)
+
   # openai:
-  #   config:
-  #     openai_api_key: "sk-..."
-  #     # openai_base_url: "https://api.openai.com/v1"  # Optional, defaults to OpenAI
+  #   # Uses OPENAI_API_KEY env var
   #   provides:
   #     - "gpt-4.*"
   #     - "gpt-5.*"
   #     - "o1-.*"
   #     - "o3-.*"
-  
-  # OpenRouter (unified API for multiple providers)
+
   # openrouter:
-  #   config:
-  #     openrouter_api_key: "sk-or-..."
+  #   # Uses OPENROUTER_API_KEY env var
   #   provides:
   #     - "anthropic/claude-3-opus"
   #     - "openai/gpt-4-turbo"
   #     - "meta-llama/llama-3.*"
-  
+
   # OpenAI-compatible endpoint (local inference, vLLM, Ollama, etc.)
-  # Models should be prefixed with "local:" for routing
   # local-inference:
   #   config:
-  #     openai_compatible_api_key: "not-needed"  # Often not required for local
-  #     openai_compatible_base_url: "http://localhost:11434/v1"  # Ollama example
+  #     openai_compatible_base_url: "http://localhost:11434/v1"
   #   provides:
   #     - "local:llama3.*"
   #     - "local:mistral.*"
-
-# Bot config tip for local models:
-# Use "local:" prefix in model names to route to openai-compatible adapter
-# Example: model: "local:llama3.2:8b"
