@@ -11,7 +11,6 @@ import injectPlugin from './inject.js'
 import uploadPlugin from './upload.js'
 import shareImagePlugin from './share-image.js'
 import mcpResourcesPlugin from './mcp-resources.js'
-import braveSearchPlugin from './brave-search.js'
 
 // Register all available plugins
 export const availablePlugins: Record<string, ToolPlugin> = {
@@ -21,7 +20,6 @@ export const availablePlugins: Record<string, ToolPlugin> = {
   'upload': uploadPlugin,
   'share-image': shareImagePlugin,
   'mcp-resources': mcpResourcesPlugin,
-  'brave-search': braveSearchPlugin,
 }
 
 export * from './types.js'
