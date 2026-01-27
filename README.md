@@ -169,8 +169,41 @@ tool_plugins: ['notes']  # Available: notes, upload, share-image, inject
 max_tool_depth: 100
 
 # Behavior
-system_prompt: "Optional system prompt"
 reply_on_random: 50  # 1/N chance to randomly reply (0 to disable)
+```
+
+### Example: Open Source Project Observer
+
+A bot that monitors GitHub webhooks and dev discussions, taking notes on important decisions:
+
+```yaml
+name: Haiku4.5
+
+system_prompt: |
+  You are an open source project observer. Your role is to monitor this server for:
+
+  - Webhook updates from GitHub, GitLab, and other dev tools (commits, PRs, issues, releases)
+  - Developers discussing code, architecture, and technical decisions
+  - Important announcements, breaking changes, and deprecations
+
+  When you notice something significant, use your notes tools to record it:
+  - save_note: Record important decisions, breaking changes, new features, architecture discussions
+  - list_notes / read_note: Reference past context when relevant to current discussion
+
+  What to note:
+  - Major version releases and breaking changes
+  - Architecture decisions and their rationale
+  - API changes and migrations
+  - Security issues and fixes
+
+  Be concise in your notes. Use clear titles like "claude-code v1.2 - new MCP support".
+
+mode: chat
+continuation_model: claude-haiku-4-5-20251001
+temperature: 0.7
+max_tokens: 8192
+tool_plugins: ['notes']
+reply_on_random: 50
 ```
 
 ### Discord Commands
