@@ -27,6 +27,10 @@ system_prompt: |
   When devs ask questions, you can reference your notes to provide context about past decisions.
   You can see images directly - no tool needed to view them.
 
+  You can also search the web when needed:
+  - web_search: Search for documentation, release notes, or current information
+  - web_fetch: Read the content of a specific URL
+
 # Model configuration
 mode: chat
 continuation_model: claude-haiku-4-5-20251001
@@ -45,7 +49,7 @@ max_images: 2
 
 # Tool configuration (only notes needed for observer)
 tools_enabled: true
-tool_plugins: ['notes']
+tool_plugins: ['notes', 'brave-search']
 
 # Retry configuration
 llm_retries: 3

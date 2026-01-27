@@ -7,7 +7,7 @@ Chapter3 supports a plugin system that extends bot functionality with tools, con
 Add plugins to your bot config:
 
 ```yaml
-tool_plugins: ['config', 'notes', 'inject']
+tool_plugins: ['notes', 'brave-search', 'inject']
 ```
 
 ## Plugin Configuration
@@ -116,6 +116,51 @@ plugin_config:
 - Rules/constraints at the start of context
 - Background information in the middle
 - Dynamic context via pinned message updates
+
+---
+
+### `brave-search` - Web Search & Fetch
+
+Web search and page fetching using the Brave Search API.
+
+**Requirements:**
+- `BRAVE_API_KEY` environment variable (get one at https://brave.com/search/api/)
+
+**Tools:**
+
+**`web_search`** - Search the web
+```
+Parameters:
+- query (required): Search query
+- count (optional): Results to return (1-10, default: 5)
+- freshness (optional): "pd" (day), "pw" (week), "pm" (month), "py" (year)
+```
+
+**`web_fetch`** - Fetch and extract content from a URL
+```
+Parameters:
+- url (required): URL to fetch (http/https)
+- maxChars (optional): Max content length (default: 30000)
+```
+
+**Features:**
+- In-memory result caching (15min search, 30min fetch)
+- HTML to markdown conversion using @mozilla/readability
+- Automatic redirect following
+- JSON pretty-printing for API responses
+
+**Example config:**
+```yaml
+tool_plugins: ['notes', 'brave-search']
+```
+
+**Example bot interaction:**
+```
+User: Can you look up the latest Claude Code MCP documentation?
+Bot: <web_search>{"query": "claude code mcp documentation"}</web_search>
+Bot: <web_fetch>{"url": "https://code.claude.com/docs/en/mcp"}</web_fetch>
+Bot: Here's what I found about MCP in Claude Code...
+```
 
 ---
 

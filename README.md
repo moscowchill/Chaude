@@ -165,7 +165,7 @@ max_images: 5
 
 # Tools
 tools_enabled: true
-tool_plugins: ['notes']  # Available: notes, upload, share-image, inject
+tool_plugins: ['notes']  # Available: notes, brave-search, upload, share-image, inject
 max_tool_depth: 100
 
 # Behavior
@@ -198,11 +198,15 @@ system_prompt: |
 
   Be concise in your notes. Use clear titles like "claude-code v1.2 - new MCP support".
 
+  You can also search the web when needed:
+  - web_search: Search for documentation, release notes, or current information
+  - web_fetch: Read the content of a specific URL
+
 mode: chat
 continuation_model: claude-haiku-4-5-20251001
 temperature: 0.7
 max_tokens: 8192
-tool_plugins: ['notes']
+tool_plugins: ['notes', 'brave-search']
 reply_on_random: 50
 ```
 
