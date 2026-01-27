@@ -49,25 +49,27 @@ API_PORT=3000
 
 ### 3. Create Bot Configuration
 
-Create `config/bots/your-bot-name.yaml`:
+Create `config/bots/your-bot-name.yaml` (see `config/bots/Haiku4.5.yaml` for a full example):
 
 ```yaml
-name: Claude  # Name used in LLM context
+name: Haiku4.5  # Name used in LLM context
 
-mode: prefill
-continuationModel: claude-3-5-sonnet-20241022
-temperature: 1.0
-maxTokens: 4096
+mode: chat
+continuation_model: claude-haiku-4-5-20251001
+temperature: 0.7
+max_tokens: 8192
 
-recencyWindowMessages: 400  # Optional: max messages
-recencyWindowCharacters: 100000  # Optional: max characters  
-rollingThreshold: 50
+recency_window_messages: 400
+recency_window_characters: 100000
+rolling_threshold: 50
 
-includeImages: true
-maxImages: 5
+include_images: true
+max_images: 5
 
-toolsEnabled: true
-toolOutputVisible: false
+tools_enabled: true
+tool_plugins: ['notes']
+
+reply_on_random: 50  # 1 in 50 chance to randomly reply
 ```
 
 ### 4. Configure Vendor
@@ -79,9 +81,10 @@ Create `config/shared.yaml` to declare which models each vendor provides. API ke
 vendors:
   anthropic:
     provides:
+      - "claude-haiku-4-5-*"
       - "claude-3-5-sonnet-*"
-      - "claude-3-opus-*"
       - "claude-sonnet-4-*"
+      - "claude-opus-4-*"
 ```
 
 **OpenAI** (uses `OPENAI_API_KEY`):
@@ -139,41 +142,35 @@ npm start
 
 ### Bot Configuration
 
+See `config/bots/Haiku4.5.yaml` for a complete example. Key options:
+
 ```yaml
 # Identity
 name: BotName  # Name used in LLM context (prefill labels, stop sequences)
 
 # Model
-mode: prefill  # or 'chat'
-continuationModel: claude-3-5-sonnet-20241022
-temperature: 1.0
-maxTokens: 4096
-topP: 1.0
+mode: chat  # or 'prefill' for base models
+continuation_model: claude-haiku-4-5-20251001
+temperature: 0.7
+max_tokens: 8192
 
 # Context
-recencyWindowMessages: 400  # Optional: max messages
-recencyWindowCharacters: 100000  # Optional: max characters
-# When both specified, whichever limit is reached first is used
-rollingThreshold: 50
+recency_window_messages: 400  # Max messages in context
+recency_window_characters: 100000  # Max characters (whichever limit hit first)
+rolling_threshold: 50  # Messages before context rolls
 
 # Images
-includeImages: true
-maxImages: 5
+include_images: true
+max_images: 5
 
 # Tools
-toolsEnabled: true
-toolOutputVisible: false
-maxToolDepth: 100
+tools_enabled: true
+tool_plugins: ['notes']  # Available: notes, upload, share-image, inject
+max_tool_depth: 100
 
-# Retry
-llmRetries: 3
-discordBackoffMax: 32000
-
-# Misc
-systemPrompt: "Optional system prompt"
-replyOnRandom: 0
-replyOnName: false
-maxQueuedReplies: 1
+# Behavior
+system_prompt: "Optional system prompt"
+reply_on_random: 50  # 1/N chance to randomly reply (0 to disable)
 ```
 
 ### Discord Commands
