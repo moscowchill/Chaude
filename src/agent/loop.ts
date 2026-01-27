@@ -1902,7 +1902,19 @@ export class AgentLoop {
       let completion = await this.completeLLM(continuationRequest, config)
 
       // Handle native tool_use in chat mode
+      // IMPORTANT: Capture text content before entering the loop - the model may return
+      // text alongside tool_use blocks, and we need to accumulate it before processing tools
       while (completion.stopReason === 'tool_use' && config.mode === 'chat' && toolDepth < maxToolDepth) {
+        // Capture any text content from this completion before processing tools
+        // This ensures text that accompanies tool_use blocks is not lost
+        const textBeforeTools = completion.content
+          .filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text')
+          .map((c) => c.text)
+          .join('')
+        if (textBeforeTools) {
+          accumulatedOutput += textBeforeTools
+          logger.debug({ textLength: textBeforeTools.length }, 'Captured text content before native tool execution')
+        }
         const toolUseBlocks = completion.content.filter((c: ContentBlock): c is ContentBlock & { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => c.type === 'tool_use')
 
         if (toolUseBlocks.length === 0) break
