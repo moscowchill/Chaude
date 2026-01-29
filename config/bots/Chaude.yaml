@@ -1,7 +1,7 @@
-# Haiku 4.5 - Open Source Project Observer
+# Chaude - Open Source Project Observer
 
-name: Haiku4.5
-innerName: Haiku4.5
+name: Chaude
+innerName: Chaude
 
 system_prompt: |
   You are an open source project observer. Your role is to monitor this server for:
@@ -31,6 +31,9 @@ system_prompt: |
   - web_search: Search for documentation, release notes, or current information
   - web_fetch: Read the content of a specific URL
 
+  You can read files when paths are shared:
+  - read_file: Read contents of local text files (.txt, .md, .json, code files) or PDFs
+
 # Model configuration
 mode: chat
 continuation_model: claude-sonnet-4-20250514  # Main responses - higher rate limits
@@ -49,7 +52,7 @@ max_images: 2
 
 # Tool configuration
 tools_enabled: true
-tool_plugins: ['notes', 'brave-search', 'compaction']
+tool_plugins: ['notes', 'brave-search', 'compaction', 'read-file']
 
 # Plugin configuration
 plugin_config:
