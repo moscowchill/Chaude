@@ -41,9 +41,9 @@ temperature: 0.7  # Balance between factual and creative
 max_tokens: 4096
 
 # Context configuration (sized for 30k tokens/min rate limit)
-recency_window_messages: 100
+recency_window_messages: 25
 recency_window_characters: 100000  # ~28k tokens - fits within 30k/min rate limit
-rolling_threshold: 50
+rolling_threshold: 20
 recent_participant_count: 10
 
 # Image configuration (minimal - focus is on code/text)
@@ -66,7 +66,7 @@ plugin_config:
   compaction:
     enabled: true
     threshold_percent: 80
-    threshold_characters: 80000     # Safety net: trigger at ~23k tokens (before 28k limit)
+    threshold_characters: 70000     # Safety net: trigger at ~20k tokens (before 28k limit)
     summary_model: claude-haiku-4-5-20251001
     max_summaries: 15
     messages_per_summary: 25
