@@ -10,7 +10,6 @@
  * - Injects summaries into context for continuity
  */
 
-import Anthropic from '@anthropic-ai/sdk'
 import { ToolPlugin, PluginStateContext, ContextInjection, ActivationResult } from './types.js'
 import { logger } from '../../utils/logger.js'
 
@@ -89,13 +88,6 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3.5)
 }
 
-/**
- * Create Anthropic client (uses ANTHROPIC_API_KEY from env)
- */
-function getAnthropicClient(): Anthropic {
-  return new Anthropic()
-}
-
 const plugin: ToolPlugin = {
   name: 'compaction',
   description: 'Auto-summarizes older context to reduce token usage',
@@ -167,6 +159,7 @@ const plugin: ToolPlugin = {
 
       // Call LLM to select relevant sources
       selectedSources = await selectRelevantSources(
+        context,
         sources,
         recentContext,
         config.selection_model,
@@ -282,17 +275,23 @@ function getRecentContextPreview(context: PluginStateContext): string {
 }
 
 /**
- * Use LLM to select relevant sources based on current topic
+ * Use LLM to select relevant sources based on current topic.
+ * Uses the framework's LLM middleware for provider-agnostic completions.
  */
 async function selectRelevantSources(
+  context: PluginStateContext,
   sources: ContextSource[],
   recentContext: string,
   model: string,
   maxSelections: number
 ): Promise<ContextSource[]> {
-  try {
-    const client = getAnthropicClient()
+  // Fallback if LLM completion not available
+  if (!context.llmComplete) {
+    logger.warn('LLM completion not available - falling back to most recent sources')
+    return sources.slice(-maxSelections)
+  }
 
+  try {
     // Build source list for selection
     const sourceList = sources.map((s, i) => {
       const topicsStr = s.topics?.length ? ` [topics: ${s.topics.join(', ')}]` : ''
@@ -317,17 +316,13 @@ Example: 1, 3, 5
 
 If none are relevant, respond with: NONE`
 
-    const response = await client.messages.create({
+    const response = await context.llmComplete({
       model,
       max_tokens: 100,
       messages: [{ role: 'user', content: prompt }],
     })
 
-    const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map(block => block.text)
-      .join('')
-      .trim()
+    const text = response.text.trim()
 
     if (text === 'NONE') {
       return []
@@ -388,6 +383,7 @@ async function runCompaction(
 
   // Call LLM for summarization with actual message content
   const summary = await createSummary(
+    context,
     messagesToSummarize,
     config.summary_model,
     result.channelId
@@ -427,17 +423,30 @@ interface MessageToSummarize {
   timestamp: string
 }
 
+/** Expected JSON response from summarization LLM */
+interface SummaryResponse {
+  summary: string
+  topics: string[]
+}
+
 /**
- * Create a summary using the LLM with actual message content
+ * Create a summary using the LLM with actual message content.
+ * Uses the framework's LLM middleware for provider-agnostic completions.
+ * Returns JSON for robust parsing.
  */
 async function createSummary(
+  context: PluginStateContext,
   messages: MessageToSummarize[],
   model: string,
   channelId: string
 ): Promise<Summary | null> {
-  try {
-    const client = getAnthropicClient()
+  // Fallback if LLM completion not available
+  if (!context.llmComplete) {
+    logger.warn('LLM completion not available - cannot create summary')
+    return null
+  }
 
+  try {
     // Format messages for summarization
     const formattedMessages = messages
       .map(m => `[${m.author}]: ${m.content}`)
@@ -457,27 +466,40 @@ Create a concise summary that preserves:
 
 Also extract 3-5 topic keywords that describe what was discussed.
 
-Respond in this exact format:
-SUMMARY: [Your concise summary here - aim for 100-200 words]
-TOPICS: topic1, topic2, topic3`
+Respond with a single JSON object with two keys:
+- "summary": a string containing your concise summary (aim for 100-200 words)
+- "topics": an array of 3-5 topic keyword strings
 
-    const response = await client.messages.create({
+Example response:
+{"summary": "The team discussed...", "topics": ["authentication", "api", "testing"]}`
+
+    const response = await context.llmComplete({
       model,
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }],
     })
 
-    const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map(block => block.text)
-      .join('')
+    const text = response.text.trim()
 
-    // Parse response
-    const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=TOPICS:|$)/s)
-    const topicsMatch = text.match(/TOPICS:\s*(.+)/s)
+    // Parse JSON response
+    let parsed: SummaryResponse
+    try {
+      // Handle potential markdown code blocks wrapping JSON
+      const jsonStr = text.replace(/^```json?\s*|\s*```$/g, '').trim()
+      parsed = JSON.parse(jsonStr)
+    } catch (parseError) {
+      logger.error({ parseError, text }, 'Failed to parse JSON response from LLM - using fallback')
+      // Fallback: try to extract content from malformed response
+      parsed = {
+        summary: `Summary of ${messages.length} messages`,
+        topics: ['conversation'],
+      }
+    }
 
-    const summaryText = summaryMatch?.[1]?.trim() || `Summary of ${messages.length} messages`
-    const topics = topicsMatch?.[1]?.split(',').map(t => t.trim()).filter(Boolean) || ['conversation']
+    const summaryText = parsed.summary || `Summary of ${messages.length} messages`
+    const topics = Array.isArray(parsed.topics) && parsed.topics.length > 0
+      ? parsed.topics
+      : ['conversation']
 
     return {
       id: `summary_${Date.now().toString(36)}`,

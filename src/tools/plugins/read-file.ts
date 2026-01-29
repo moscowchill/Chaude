@@ -45,6 +45,10 @@ interface ReadFileInput {
 }
 
 // Dynamic import for pdf-parse (optional dependency)
+// Note: pdf-parse v2.x uses a class-based API (PDFParse) that differs from
+// @types/pdf-parse which targets v1.x's function-based API. We use a custom
+// type definition and cast with `as unknown as PdfParseClass` to handle this
+// mismatch. The runtime behavior is correct for pdf-parse v2.x.
 type PdfParseResult = { text: string; numPages: number }
 type PdfParseClass = new (options: { data: Buffer }) => { getText: () => Promise<{ text: string }>; getInfo: () => Promise<{ numPages: number }>; destroy: () => Promise<void> }
 let PdfParse: PdfParseClass | null | undefined = null
@@ -53,6 +57,8 @@ async function loadPdfParse(): Promise<PdfParseClass | null> {
   if (PdfParse === null) {
     try {
       const module = await import('pdf-parse')
+      // Cast needed due to type definition mismatch between @types/pdf-parse (v1.x API)
+      // and actual pdf-parse v2.x class-based API
       PdfParse = module.PDFParse as unknown as PdfParseClass
     } catch {
       // pdf-parse not installed

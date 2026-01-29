@@ -1287,9 +1287,34 @@ export class AgentLoop {
       if (loadedPlugins.size > 0) {
         // Create plugin context factory with message IDs
         const messageIds = discordContext.messages.map(m => m.id)
+
+        // Create LLM completion wrapper for plugins (provider-agnostic)
+        const llmComplete = async (request: { model: string; messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; [key: string]: unknown }> }>; max_tokens: number; temperature?: number }) => {
+          const completion = await this.llmMiddleware.completeRaw({
+            model: request.model,
+            messages: request.messages,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature ?? 0.7,
+            top_p: 1,
+          })
+          // Extract text from content blocks
+          const text = completion.content
+            .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+            .map(block => block.text)
+            .join('')
+          return {
+            text,
+            usage: completion.usage ? {
+              inputTokens: completion.usage.inputTokens,
+              outputTokens: completion.usage.outputTokens,
+            } : undefined,
+          }
+        }
+
         const pluginContextFactory = new PluginContextFactory({
           cacheDir: this.cacheDir,
           messageIds,
+          llmComplete,
         })
         
         // Create base context for plugins

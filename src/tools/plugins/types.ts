@@ -138,6 +138,30 @@ export interface PluginContext {
 }
 
 /**
+ * LLM completion request for plugins (mirrors ProviderRequest from middleware)
+ */
+export interface PluginLLMRequest {
+  model: string
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant'
+    content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
+  }>
+  max_tokens: number
+  temperature?: number
+}
+
+/**
+ * LLM completion response for plugins
+ */
+export interface PluginLLMResponse {
+  text: string
+  usage?: {
+    inputTokens: number
+    outputTokens: number
+  }
+}
+
+/**
  * Extended context with state management for context injections
  */
 export interface PluginStateContext extends PluginContext {
@@ -196,6 +220,13 @@ export interface PluginStateContext extends PluginContext {
    * Defaults to 'channel' if not configured.
    */
   configuredScope: StateScope
+
+  /**
+   * Make an LLM completion request through the framework's middleware.
+   * This is provider-agnostic and benefits from retry logic and tracing.
+   * Optional - may not be available in all contexts.
+   */
+  llmComplete?: (request: PluginLLMRequest) => Promise<PluginLLMResponse>
 }
 
 /**
