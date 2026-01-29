@@ -40,10 +40,10 @@ continuation_model: claude-sonnet-4-20250514  # Main responses - higher rate lim
 temperature: 0.7  # Balance between factual and creative
 max_tokens: 4096
 
-# Context configuration (large context - retry utility handles rate limits)
-recency_window_messages: 500
-recency_window_characters: 468000  # ~133k tokens - uses most of 200k context
-rolling_threshold: 150
+# Context configuration (sized for 30k tokens/min rate limit)
+recency_window_messages: 100
+recency_window_characters: 100000  # ~28k tokens - fits within 30k/min rate limit
+rolling_threshold: 50
 recent_participant_count: 10
 
 # Image configuration (minimal - focus is on code/text)
@@ -63,7 +63,7 @@ plugin_config:
   compaction:
     enabled: true
     threshold_percent: 80
-    threshold_characters: 350000    # Safety net: also trigger at ~100k tokens
+    threshold_characters: 80000     # Safety net: trigger at ~23k tokens (before 28k limit)
     summary_model: claude-haiku-4-5-20251001
     max_summaries: 15
     messages_per_summary: 25
