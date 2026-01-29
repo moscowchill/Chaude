@@ -35,6 +35,7 @@ interface CompactionState {
 interface CompactionConfig {
   enabled?: boolean
   threshold_percent?: number        // Trigger at this % of rolling_threshold (default: 80)
+  threshold_characters?: number     // Also trigger if context exceeds this many chars (default: 0 = disabled)
   summary_model?: string            // Model for summarization (default: claude-haiku-4-5-20251001)
   max_summaries?: number            // Max summaries to keep (default: 15)
   messages_per_summary?: number     // Messages to summarize at once (default: 25)
@@ -48,6 +49,7 @@ interface CompactionConfig {
 const DEFAULT_CONFIG: Required<CompactionConfig> = {
   enabled: true,
   threshold_percent: 80,
+  threshold_characters: 0,          // Disabled by default, set in config for safety net
   summary_model: 'claude-haiku-4-5-20251001',
   max_summaries: 15,
   messages_per_summary: 25,
@@ -215,18 +217,30 @@ const plugin: ToolPlugin = {
     const rollingThreshold = botConfig.rolling_threshold ?? 50
     const thresholdMessages = Math.floor(rollingThreshold * (config.threshold_percent / 100))
 
-    // Check if we're approaching threshold
-    if (result.messageCount < thresholdMessages) {
+    // Calculate total context characters for safety net check
+    const contextMessages = result.contextMessages || []
+    const totalCharacters = contextMessages.reduce((sum, m) => sum + m.content.length, 0)
+    const characterThresholdExceeded = config.threshold_characters > 0 && totalCharacters >= config.threshold_characters
+
+    // Check if we're approaching either threshold (message count OR character count)
+    const messageThresholdExceeded = result.messageCount >= thresholdMessages
+
+    if (!messageThresholdExceeded && !characterThresholdExceeded) {
       logger.debug({
         messageCount: result.messageCount,
-        threshold: thresholdMessages,
-      }, 'Below compaction threshold')
+        messageThreshold: thresholdMessages,
+        totalCharacters,
+        characterThreshold: config.threshold_characters,
+      }, 'Below compaction thresholds')
       return
     }
 
     logger.info({
       messageCount: result.messageCount,
-      threshold: thresholdMessages,
+      messageThreshold: thresholdMessages,
+      totalCharacters,
+      characterThreshold: config.threshold_characters,
+      triggeredBy: characterThresholdExceeded ? 'characters' : 'messages',
       channelId: result.channelId,
     }, 'Compaction threshold reached - starting summarization')
 

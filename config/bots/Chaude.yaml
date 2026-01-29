@@ -63,6 +63,7 @@ plugin_config:
   compaction:
     enabled: true
     threshold_percent: 80
+    threshold_characters: 350000    # Safety net: also trigger at ~100k tokens
     summary_model: claude-haiku-4-5-20251001
     max_summaries: 15
     messages_per_summary: 25
