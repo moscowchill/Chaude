@@ -4,13 +4,14 @@
  * Creates PluginStateContext instances for plugins to use.
  */
 
-import { PluginContext, PluginStateContext } from './types.js'
+import { PluginContext, PluginStateContext, PluginLLMRequest, PluginLLMResponse } from './types.js'
 import { PluginStateManager, StateScope } from './state.js'
 import { logger } from '../../utils/logger.js'
 
 export interface PluginContextFactoryParams {
   cacheDir: string
   messageIds: string[]  // Ordered list of message IDs in context (oldest to newest)
+  llmComplete?: (request: PluginLLMRequest) => Promise<PluginLLMResponse>
 }
 
 /**
@@ -25,12 +26,14 @@ export class PluginContextFactory {
   private messageIds: string[]
   private messageIdSet: Set<string>
   private messagePositions: Map<string, number>
-  
+  private llmComplete?: (request: PluginLLMRequest) => Promise<PluginLLMResponse>
+
   constructor(params: PluginContextFactoryParams) {
     this.cacheDir = params.cacheDir
     this.messageIds = params.messageIds
     this.messageIdSet = new Set(params.messageIds)
-    
+    this.llmComplete = params.llmComplete
+
     // Build position map for fast lookups
     this.messagePositions = new Map()
     for (let i = 0; i < params.messageIds.length; i++) {
@@ -88,9 +91,10 @@ export class PluginContextFactory {
       inheritanceInfo,
       pluginConfig,
       configuredScope,
-      
+
       messagesSinceId,
-      
+      llmComplete: this.llmComplete,
+
       async getState<T>(scope: StateScope): Promise<T | null> {
         switch (scope) {
           case 'global':

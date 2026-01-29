@@ -178,7 +178,8 @@ export interface BotConfig {
   // Text attachment config
   include_text_attachments: boolean
   max_text_attachment_kb: number  // Max size per text attachment in KB
-  
+  max_message_chars: number       // Max chars per message (0 = unlimited, truncates with notice)
+
   // Tool config
   tools_enabled: boolean
   tool_output_visible: boolean

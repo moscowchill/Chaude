@@ -17,7 +17,7 @@ import {
   ToolDefinition,
 } from '../types.js'
 import { logger } from '../utils/logger.js'
-import { retryLLM } from '../utils/retry.js'
+import { retryLLMWithRateLimit } from '../utils/retry.js'
 import { matchesAny } from '../utils/validation.js'
 
 export interface LLMProvider {
@@ -106,8 +106,8 @@ export class LLMMiddleware {
         ? this.transformToPrefill(request, provider)
         : this.transformToChat(request, provider)
 
-    // Execute with retries
-    const completion = await retryLLM(
+    // Execute with retries (rate-limit aware)
+    const completion = await retryLLMWithRateLimit(
       () => provider.complete(providerRequest),
       3  // TODO: Get from config
     )
@@ -122,7 +122,7 @@ export class LLMMiddleware {
   async completeRaw(request: ProviderRequest): Promise<LLMCompletion> {
     const provider = this.selectProvider(request.model)
 
-    const completion = await retryLLM(
+    const completion = await retryLLMWithRateLimit(
       () => provider.complete(request),
       3
     )

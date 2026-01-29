@@ -44,6 +44,49 @@ export interface ToolPlugin {
    * Use to set up initial state or inherit from parent.
    */
   onInit?: (context: PluginStateContext) => Promise<void>
+
+  /**
+   * Called after a successful activation completes (response sent to Discord).
+   * Runs in background - not awaited. Use for background tasks like context compaction.
+   * @param context Plugin state context
+   * @param result Activation result metadata
+   */
+  onPostActivation?: (
+    context: PluginStateContext,
+    result: ActivationResult
+  ) => Promise<void>
+}
+
+/**
+ * Metadata about a completed activation, passed to onPostActivation hooks.
+ */
+export interface ActivationResult {
+  /** Whether the activation succeeded */
+  success: boolean
+  /** Channel ID */
+  channelId: string
+  /** Guild ID */
+  guildId: string
+  /** Triggering message ID */
+  triggeringMessageId?: string
+  /** Number of messages in context */
+  messageCount: number
+  /** Approximate token usage */
+  tokenUsage: {
+    inputTokens: number
+    outputTokens: number
+  }
+  /** Number of tool calls made */
+  toolCallCount: number
+  /** IDs of messages sent by the bot */
+  sentMessageIds: string[]
+  /** Messages that were in context (for compaction plugin) */
+  contextMessages?: Array<{
+    id: string
+    author: string
+    content: string
+    timestamp: string
+  }>
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -92,6 +135,30 @@ export interface PluginContext {
   uploadFile?: (buffer: Buffer, filename: string, contentType: string, caption?: string) => Promise<string[]>  // Upload a file
   /** Images visible to the bot (from Discord context + MCP tool results), newest first */
   visibleImages?: VisibleImage[]
+}
+
+/**
+ * LLM completion request for plugins (mirrors ProviderRequest from middleware)
+ */
+export interface PluginLLMRequest {
+  model: string
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant'
+    content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
+  }>
+  max_tokens: number
+  temperature?: number
+}
+
+/**
+ * LLM completion response for plugins
+ */
+export interface PluginLLMResponse {
+  text: string
+  usage?: {
+    inputTokens: number
+    outputTokens: number
+  }
 }
 
 /**
@@ -153,6 +220,13 @@ export interface PluginStateContext extends PluginContext {
    * Defaults to 'channel' if not configured.
    */
   configuredScope: StateScope
+
+  /**
+   * Make an LLM completion request through the framework's middleware.
+   * This is provider-agnostic and benefits from retry logic and tracing.
+   * Optional - may not be available in all contexts.
+   */
+  llmComplete?: (request: PluginLLMRequest) => Promise<PluginLLMResponse>
 }
 
 /**

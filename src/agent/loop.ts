@@ -1287,9 +1287,34 @@ export class AgentLoop {
       if (loadedPlugins.size > 0) {
         // Create plugin context factory with message IDs
         const messageIds = discordContext.messages.map(m => m.id)
+
+        // Create LLM completion wrapper for plugins (provider-agnostic)
+        const llmComplete = async (request: { model: string; messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; [key: string]: unknown }> }>; max_tokens: number; temperature?: number }) => {
+          const completion = await this.llmMiddleware.completeRaw({
+            model: request.model,
+            messages: request.messages,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature ?? 0.7,
+            top_p: 1,
+          })
+          // Extract text from content blocks
+          const text = completion.content
+            .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+            .map(block => block.text)
+            .join('')
+          return {
+            text,
+            usage: completion.usage ? {
+              inputTokens: completion.usage.inputTokens,
+              outputTokens: completion.usage.outputTokens,
+            } : undefined,
+          }
+        }
+
         const pluginContextFactory = new PluginContextFactory({
           cacheDir: this.cacheDir,
           messageIds,
+          llmComplete,
         })
         
         // Create base context for plugins
@@ -1637,15 +1662,152 @@ export class AgentLoop {
       }
 
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
+
+      // Fire post-activation hooks for plugins (runs in background)
+      // Include message content for compaction plugin
+      const contextMessages = discordContext.messages.map(m => ({
+        id: m.id,
+        author: m.author.username,
+        content: m.content,
+        timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : String(m.timestamp),
+      }))
+
+      this.toolSystem.firePostActivationHooks({
+        success: true,
+        channelId,
+        guildId,
+        triggeringMessageId,
+        messageCount: contextResult.request.messages.length,
+        tokenUsage: {
+          inputTokens: completion.usage?.inputTokens ?? 0,
+          outputTokens: completion.usage?.outputTokens ?? 0,
+        },
+        toolCallCount: trace?.getLLMCallCount() ?? 0,
+        sentMessageIds,
+        contextMessages,
+      })
     } catch (error) {
       await this.connector.stopTyping(channelId)
-      
+
       // Record error to trace
       if (trace) {
         trace.recordError('llm_call', error instanceof Error ? error : new Error(String(error)))
       }
-      
+
+      // Send error feedback to Discord so users know what happened
+      await this.sendErrorFeedback(channelId, triggeringMessageId, error)
+
       throw error
+    }
+  }
+
+  /**
+   * Send error feedback to Discord when an activation fails.
+   * Helps users understand what went wrong without checking logs.
+   */
+  private async sendErrorFeedback(
+    channelId: string,
+    triggeringMessageId: string | undefined,
+    error: unknown
+  ): Promise<void> {
+    try {
+      // Extract error details
+      const errorDetails = this.extractErrorDetails(error)
+
+      // Add reaction to indicate error type
+      if (triggeringMessageId) {
+        const emoji = errorDetails.isRateLimit ? '⏳' : '❌'
+        await this.connector.addReaction(channelId, triggeringMessageId, emoji)
+      }
+
+      // Send error message
+      let message: string
+      if (errorDetails.isRateLimit) {
+        const waitTime = errorDetails.retryAfter
+          ? `~${Math.ceil(errorDetails.retryAfter / 60)} min`
+          : 'a moment'
+        message = `Rate limited - too many tokens/minute. Please wait ${waitTime} and try again.`
+      } else if (errorDetails.isOverloaded) {
+        message = `API is overloaded right now. Please try again in a moment.`
+      } else if (errorDetails.isTimeout) {
+        message = `Request timed out. The context might be too large - try again.`
+      } else {
+        message = `Something went wrong: ${errorDetails.shortMessage}`
+      }
+
+      await this.connector.sendMessage(channelId, message, triggeringMessageId)
+
+      logger.debug({
+        channelId,
+        errorType: errorDetails.type,
+        message
+      }, 'Sent error feedback to Discord')
+    } catch (feedbackError) {
+      // Don't let feedback errors mask the original error
+      logger.warn({ feedbackError }, 'Failed to send error feedback to Discord')
+    }
+  }
+
+  /**
+   * Extract structured error details from various error types.
+   */
+  private extractErrorDetails(error: unknown): {
+    type: string
+    shortMessage: string
+    isRateLimit: boolean
+    isOverloaded: boolean
+    isTimeout: boolean
+    retryAfter?: number
+  } {
+    const details = (error as { details?: unknown })?.details as Record<string, unknown> | undefined
+    const status = details?.status as number | undefined
+    const apiError = (details?.error as Record<string, unknown>)?.error as Record<string, unknown> | undefined
+    const errorType = apiError?.type as string | undefined
+    const headers = details?.headers as Record<string, string> | undefined
+
+    // Check for rate limit
+    if (status === 429 || errorType === 'rate_limit_error') {
+      const retryAfter = headers?.['retry-after'] ? parseInt(headers['retry-after'], 10) : undefined
+      return {
+        type: 'rate_limit',
+        shortMessage: 'Rate limit exceeded',
+        isRateLimit: true,
+        isOverloaded: false,
+        isTimeout: false,
+        retryAfter,
+      }
+    }
+
+    // Check for overloaded
+    if (status === 529 || errorType === 'overloaded_error') {
+      return {
+        type: 'overloaded',
+        shortMessage: 'API overloaded',
+        isRateLimit: false,
+        isOverloaded: true,
+        isTimeout: false,
+      }
+    }
+
+    // Check for timeout
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.toLowerCase().includes('timeout') || message.toLowerCase().includes('timed out')) {
+      return {
+        type: 'timeout',
+        shortMessage: 'Request timed out',
+        isRateLimit: false,
+        isOverloaded: false,
+        isTimeout: true,
+      }
+    }
+
+    // Generic error
+    return {
+      type: 'unknown',
+      shortMessage: message.length > 100 ? message.substring(0, 100) + '...' : message,
+      isRateLimit: false,
+      isOverloaded: false,
+      isTimeout: false,
     }
   }
 

@@ -626,16 +626,27 @@ export class ContextBuilder {
       return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
-    // If not rolling yet, allow normal limits to be exceeded (for cache efficiency)
+    // If not rolling yet, still enforce limits if exceeded (prevents rate limit errors)
+    // Only skip enforcement if we're under the normal limit
     if (!shouldRoll) {
-      logger.debug({
-        messagesSinceRoll,
-        threshold: config.rolling_threshold,
-        messageCount: messages.length,
+      if (totalChars <= normalLimit) {
+        logger.debug({
+          messagesSinceRoll,
+          threshold: config.rolling_threshold,
+          messageCount: messages.length,
+          totalChars,
+          totalMB: (totalChars / 1024 / 1024).toFixed(2)
+        }, 'Not rolling yet - keeping all messages for cache')
+        return { messages, didTruncate: false, messagesRemoved: 0 }
+      }
+      // Over limit even on first activation - must truncate to avoid rate limits
+      logger.info({
         totalChars,
-        totalMB: (totalChars / 1024 / 1024).toFixed(2)
-      }, 'Not rolling yet - keeping all messages for cache')
-      return { messages, didTruncate: false, messagesRemoved: 0 }
+        limit: normalLimit,
+        messageCount: messages.length
+      }, 'First activation but over limit - truncating to avoid rate limits')
+      const result = this.truncateToLimit(messages, normalLimit, true)
+      return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
     // Time to roll - check normal limits
@@ -909,22 +920,37 @@ export class ContextBuilder {
     for (const msg of messages) {
       const content: ContentBlock[] = []
 
-      // Add text content
+      // Add text content (with optional truncation for very long messages)
       if (msg.content.trim()) {
+        let messageText = msg.content
+        const maxChars = config.max_message_chars || 0
+
+        if (maxChars > 0 && messageText.length > maxChars) {
+          messageText = messageText.slice(0, maxChars) + `\n\n[Message truncated - ${messageText.length.toLocaleString()} chars exceeded ${maxChars.toLocaleString()} limit]`
+          logger.debug({
+            messageId: msg.id,
+            originalChars: msg.content.length,
+            maxChars,
+          }, 'Truncated long message')
+        }
+
         content.push({
           type: 'text',
-          text: msg.content,
+          text: messageText,
         })
       }
 
-      const docAttachments = documentsByMessageId.get(msg.id)
-      if (docAttachments && docAttachments.length > 0) {
-        for (const doc of docAttachments) {
-          const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
-          content.push({
-            type: 'text',
-            text: `📎 ${doc.filename}\n${doc.text}${truncatedNotice}`,
-          })
+      // Add document attachments only if enabled in config
+      if (config.include_text_attachments !== false) {
+        const docAttachments = documentsByMessageId.get(msg.id)
+        if (docAttachments && docAttachments.length > 0) {
+          for (const doc of docAttachments) {
+            const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
+            content.push({
+              type: 'text',
+              text: `📎 ${doc.filename}\n${doc.text}${truncatedNotice}`,
+            })
+          }
         }
       }
 

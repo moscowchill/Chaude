@@ -8,7 +8,9 @@ A sophisticated Discord chat bot framework with multi-LLM support, MCP tool inte
 - **Multiple LLM Providers**: Anthropic, AWS Bedrock, OpenAI-compatible, Google Gemini
 - **Prefill & Chat Modes**: Full support for both conversation modes
 - **MCP Tool Integration**: Native Model Context Protocol support
+- **Smart Context Compaction**: Auto-summarizes old messages to preserve context while reducing tokens
 - **Rolling Context**: Efficient prompt caching with rolling message windows
+- **Rate-Limit Handling**: Respects API rate limits with proper backoff and Discord error feedback
 - **Hierarchical Configuration**: YAML-based config with guild/channel overrides
 - **Image Support**: Automatic image caching and vision input
 - **Advanced Features**: History commands, m commands, dot messages
@@ -165,7 +167,7 @@ max_images: 5
 
 # Tools
 tools_enabled: true
-tool_plugins: ['notes']  # Available: notes, brave-search, upload, share-image, inject
+tool_plugins: ['notes']  # Available: notes, brave-search, upload, share-image, inject, compaction
 max_tool_depth: 100
 
 # Behavior
@@ -208,6 +210,55 @@ temperature: 0.7
 max_tokens: 8192
 tool_plugins: ['notes', 'brave-search']
 reply_on_random: 50
+```
+
+### Context Compaction
+
+The compaction plugin automatically summarizes older messages to preserve context while reducing token usage. This prevents rate limits and keeps important information accessible.
+
+**How it works:**
+1. After each activation, checks if context is approaching the rolling threshold
+2. Summarizes the oldest ~25 messages using a fast model (Haiku 4.5)
+3. Extracts topic keywords for future intelligent retrieval
+4. Injects summaries at the start of context on subsequent activations
+
+**Enable compaction:**
+```yaml
+tool_plugins: ['notes', 'compaction']
+
+plugin_config:
+  compaction:
+    enabled: true
+    threshold_percent: 80           # Trigger at 80% of rolling_threshold
+    summary_model: claude-haiku-4-5-20251001  # Fast/cheap model for summaries
+    max_summaries: 15               # Keep at most 15 summaries
+    messages_per_summary: 25        # Summarize in blocks of 25 messages
+```
+
+**Token savings:**
+- Before: 100 old messages = ~8,000 tokens
+- After: 1 summary = ~500 tokens
+- **~90% reduction** on older context
+
+**Intelligent selection:** When you have many notes and summaries, the plugin asks the LLM which ones are relevant to the current topic:
+```yaml
+plugin_config:
+  notes:
+    inject_into_context: false  # Let compaction handle injection
+  compaction:
+    enable_selection: true
+    selection_model: claude-haiku-4-5-20251001
+    selection_threshold: 5      # Only select if >5 sources
+    max_injections: 5           # Inject at most 5 relevant sources
+```
+
+**Best practice:** Use a powerful model (Sonnet 4) for main responses and a fast model (Haiku 4.5) for background work:
+```yaml
+continuation_model: claude-sonnet-4-20250514  # Main responses
+plugin_config:
+  compaction:
+    summary_model: claude-haiku-4-5-20251001   # Summarization
+    selection_model: claude-haiku-4-5-20251001 # Topic selection
 ```
 
 ### Discord Commands

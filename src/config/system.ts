@@ -281,6 +281,7 @@ export class ConfigSystem {
       // Text attachment config
       include_text_attachments: config.include_text_attachments ?? true,
       max_text_attachment_kb: config.max_text_attachment_kb || 100,  // 100KB default
+      max_message_chars: config.max_message_chars || 0,  // 0 = unlimited, otherwise truncate with notice
 
       // Tool config
       tools_enabled: config.tools_enabled ?? true,

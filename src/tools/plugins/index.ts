@@ -12,6 +12,8 @@ import uploadPlugin from './upload.js'
 import shareImagePlugin from './share-image.js'
 import mcpResourcesPlugin from './mcp-resources.js'
 import braveSearchPlugin from './brave-search.js'
+import compactionPlugin from './compaction.js'
+import readFilePlugin from './read-file.js'
 
 // Register all available plugins
 export const availablePlugins: Record<string, ToolPlugin> = {
@@ -22,6 +24,8 @@ export const availablePlugins: Record<string, ToolPlugin> = {
   'share-image': shareImagePlugin,
   'mcp-resources': mcpResourcesPlugin,
   'brave-search': braveSearchPlugin,
+  'compaction': compactionPlugin,
+  'read-file': readFilePlugin,
 }
 
 export * from './types.js'

@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolDefinition, ToolCall, ToolResult, ToolError, MCPServerConfig } from '../types.js'
 import { logger } from '../utils/logger.js'
-import { availablePlugins, PluginTool, PluginContext, PluginStateContext, ToolPlugin } from './plugins/index.js'
+import { availablePlugins, PluginTool, PluginContext, PluginStateContext, ToolPlugin, ActivationResult } from './plugins/index.js'
 
 export class ToolSystem {
   private mcpClients = new Map<string, Client>()
@@ -87,6 +87,37 @@ export class ToolSystem {
   setPluginContextFactory(factory: unknown, pluginConfigs?: Record<string, Record<string, unknown>>): void {
     this.pluginContextFactory = factory
     this.pluginConfigs = pluginConfigs || {}
+  }
+
+  /**
+   * Call onPostActivation hooks for all loaded plugins.
+   * Runs in background - does not await. Errors are logged but don't propagate.
+   */
+  firePostActivationHooks(result: ActivationResult): void {
+    const factory = this.pluginContextFactory as {
+      createStateContext: (pluginName: string, pluginConfig?: Record<string, unknown>) => PluginStateContext
+    } | null
+
+    if (!factory) {
+      logger.debug('No plugin context factory - skipping post-activation hooks')
+      return
+    }
+
+    for (const [pluginName, plugin] of this.loadedPluginObjects) {
+      if (plugin.onPostActivation) {
+        // Run in background - don't await
+        const pluginConfig = this.pluginConfigs[pluginName]
+        const context = factory.createStateContext(pluginName, pluginConfig)
+
+        plugin.onPostActivation(context, result)
+          .then(() => {
+            logger.debug({ pluginName }, 'Post-activation hook completed')
+          })
+          .catch((error) => {
+            logger.error({ error, pluginName }, 'Post-activation hook failed')
+          })
+      }
+    }
   }
 
   /**
