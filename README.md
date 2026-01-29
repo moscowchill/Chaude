@@ -240,12 +240,25 @@ plugin_config:
 - After: 1 summary = ~500 tokens
 - **~90% reduction** on older context
 
-**Best practice:** Use a powerful model (Sonnet 4) for main responses and a fast model (Haiku 4.5) for background summarization:
+**Intelligent selection:** When you have many notes and summaries, the plugin asks the LLM which ones are relevant to the current topic:
+```yaml
+plugin_config:
+  notes:
+    inject_into_context: false  # Let compaction handle injection
+  compaction:
+    enable_selection: true
+    selection_model: claude-haiku-4-5-20251001
+    selection_threshold: 5      # Only select if >5 sources
+    max_injections: 5           # Inject at most 5 relevant sources
+```
+
+**Best practice:** Use a powerful model (Sonnet 4) for main responses and a fast model (Haiku 4.5) for background work:
 ```yaml
 continuation_model: claude-sonnet-4-20250514  # Main responses
 plugin_config:
   compaction:
-    summary_model: claude-haiku-4-5-20251001  # Background summaries
+    summary_model: claude-haiku-4-5-20251001   # Summarization
+    selection_model: claude-haiku-4-5-20251001 # Topic selection
 ```
 
 ### Discord Commands
