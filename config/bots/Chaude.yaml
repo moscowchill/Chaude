@@ -40,10 +40,10 @@ continuation_model: claude-sonnet-4-20250514  # Main responses - higher rate lim
 temperature: 0.7  # Balance between factual and creative
 max_tokens: 4096
 
-# Context configuration (reduced to stay under rate limits)
-recency_window_messages: 200
-recency_window_characters: 50000  # ~14k tokens - leaves room for summaries
-rolling_threshold: 50
+# Context configuration (large context - retry utility handles rate limits)
+recency_window_messages: 500
+recency_window_characters: 468000  # ~133k tokens - uses most of 200k context
+rolling_threshold: 150
 recent_participant_count: 10
 
 # Image configuration (minimal - focus is on code/text)
