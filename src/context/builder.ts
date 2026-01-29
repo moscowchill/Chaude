@@ -909,11 +909,23 @@ export class ContextBuilder {
     for (const msg of messages) {
       const content: ContentBlock[] = []
 
-      // Add text content
+      // Add text content (with optional truncation for very long messages)
       if (msg.content.trim()) {
+        let messageText = msg.content
+        const maxChars = config.max_message_chars || 0
+
+        if (maxChars > 0 && messageText.length > maxChars) {
+          messageText = messageText.slice(0, maxChars) + `\n\n[Message truncated - ${messageText.length.toLocaleString()} chars exceeded ${maxChars.toLocaleString()} limit]`
+          logger.debug({
+            messageId: msg.id,
+            originalChars: msg.content.length,
+            maxChars,
+          }, 'Truncated long message')
+        }
+
         content.push({
           type: 'text',
-          text: msg.content,
+          text: messageText,
         })
       }
 
