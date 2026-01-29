@@ -940,14 +940,17 @@ export class ContextBuilder {
         })
       }
 
-      const docAttachments = documentsByMessageId.get(msg.id)
-      if (docAttachments && docAttachments.length > 0) {
-        for (const doc of docAttachments) {
-          const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
-          content.push({
-            type: 'text',
-            text: `📎 ${doc.filename}\n${doc.text}${truncatedNotice}`,
-          })
+      // Add document attachments only if enabled in config
+      if (config.include_text_attachments !== false) {
+        const docAttachments = documentsByMessageId.get(msg.id)
+        if (docAttachments && docAttachments.length > 0) {
+          for (const doc of docAttachments) {
+            const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
+            content.push({
+              type: 'text',
+              text: `📎 ${doc.filename}\n${doc.text}${truncatedNotice}`,
+            })
+          }
         }
       }
 
