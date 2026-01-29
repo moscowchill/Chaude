@@ -50,6 +50,9 @@ recent_participant_count: 10
 include_images: true
 max_images: 2
 
+# Text attachments - don't auto-include, use read_file tool when asked
+include_text_attachments: false
+
 # Tool configuration
 tools_enabled: true
 tool_plugins: ['notes', 'brave-search', 'compaction', 'read-file']
