@@ -89,15 +89,46 @@ export async function retryLLM<T>(
 }
 
 /**
+ * Type guard helpers for safe property access on unknown error objects
+ */
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function hasProperty<K extends string>(obj: Record<string, unknown>, key: K): obj is Record<K, unknown> {
+  return key in obj
+}
+
+/**
  * Extract retry-after duration from a rate limit error.
  * Returns undefined if not a rate limit error or no retry-after header.
+ * Uses type guards for safe property access instead of brittle type assertions.
  */
 function extractRetryAfter(error: unknown): number | undefined {
-  const details = (error as { details?: unknown })?.details as Record<string, unknown> | undefined
-  const status = details?.status as number | undefined
-  const headers = details?.headers as Record<string, string> | undefined
-  const apiError = (details?.error as Record<string, unknown>)?.error as Record<string, unknown> | undefined
-  const errorType = apiError?.type as string | undefined
+  // Safely navigate the error object structure
+  if (!isObject(error)) {
+    return undefined
+  }
+
+  if (!hasProperty(error, 'details') || !isObject(error.details)) {
+    return undefined
+  }
+
+  const details = error.details
+  const status = hasProperty(details, 'status') ? details.status : undefined
+  const headers = hasProperty(details, 'headers') && isObject(details.headers) ? details.headers : undefined
+
+  // Extract nested error type: details.error.error.type
+  let errorType: unknown
+  if (hasProperty(details, 'error') && isObject(details.error)) {
+    const errorObj = details.error
+    if (hasProperty(errorObj, 'error') && isObject(errorObj.error)) {
+      const innerError = errorObj.error
+      if (hasProperty(innerError, 'type')) {
+        errorType = innerError.type
+      }
+    }
+  }
 
   // Check if it's a rate limit error
   if (status !== 429 && errorType !== 'rate_limit_error') {
@@ -105,11 +136,13 @@ function extractRetryAfter(error: unknown): number | undefined {
   }
 
   // Try to extract retry-after header
-  const retryAfterStr = headers?.['retry-after']
-  if (retryAfterStr) {
-    const seconds = parseInt(retryAfterStr, 10)
-    if (!isNaN(seconds) && seconds > 0) {
-      return seconds * 1000 // Convert to milliseconds
+  if (headers && hasProperty(headers, 'retry-after')) {
+    const retryAfterStr = headers['retry-after']
+    if (typeof retryAfterStr === 'string') {
+      const seconds = parseInt(retryAfterStr, 10)
+      if (!isNaN(seconds) && seconds > 0) {
+        return seconds * 1000 // Convert to milliseconds
+      }
     }
   }
 
