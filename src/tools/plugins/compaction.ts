@@ -39,6 +39,11 @@ interface CompactionConfig {
   summary_model?: string            // Model for summarization (default: claude-haiku-4-5-20251001)
   max_summaries?: number            // Max summaries to keep (default: 15)
   messages_per_summary?: number     // Messages to summarize at once (default: 25)
+  // Selection options
+  enable_selection?: boolean        // Enable LLM-driven selection (default: true)
+  selection_model?: string          // Model for selection (default: same as summary_model)
+  selection_threshold?: number      // Only select if more than N sources (default: 5)
+  max_injections?: number           // Max sources to inject after selection (default: 5)
 }
 
 const DEFAULT_CONFIG: Required<CompactionConfig> = {
@@ -47,6 +52,34 @@ const DEFAULT_CONFIG: Required<CompactionConfig> = {
   summary_model: 'claude-haiku-4-5-20251001',
   max_summaries: 15,
   messages_per_summary: 25,
+  enable_selection: true,
+  selection_model: 'claude-haiku-4-5-20251001',
+  selection_threshold: 5,
+  max_injections: 5,
+}
+
+/** Note from notes plugin */
+interface Note {
+  id: string
+  content: string
+  createdAt: string
+  createdByMessageId: string
+}
+
+/** Notes plugin state structure */
+interface NotesState {
+  notes: Note[]
+  lastModifiedMessageId: string | null
+}
+
+/** A source that can be injected (note or summary) */
+interface ContextSource {
+  type: 'note' | 'summary'
+  id: string
+  preview: string      // Short preview for selection prompt
+  content: string      // Full content for injection
+  topics?: string[]    // Topics (summaries only)
+  tokenEstimate: number
 }
 
 /**
@@ -71,7 +104,8 @@ const plugin: ToolPlugin = {
   tools: [],
 
   /**
-   * Inject stored summaries into context
+   * Inject selected summaries and notes into context.
+   * Uses LLM-driven selection when there are many sources.
    */
   getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
     const config = { ...DEFAULT_CONFIG, ...context.pluginConfig } as Required<CompactionConfig>
@@ -81,20 +115,82 @@ const plugin: ToolPlugin = {
     }
 
     const scope = context.configuredScope
-    const state = await context.getState<CompactionState>(scope)
 
-    if (!state?.summaries.length) {
+    // Gather all context sources
+    const sources: ContextSource[] = []
+
+    // 1. Get summaries from compaction state
+    const compactionState = await context.getState<CompactionState>(scope)
+    if (compactionState?.summaries.length) {
+      for (const summary of compactionState.summaries) {
+        sources.push({
+          type: 'summary',
+          id: summary.id,
+          preview: summary.summary.slice(0, 150) + (summary.summary.length > 150 ? '...' : ''),
+          content: formatSummaryForInjection(summary),
+          topics: summary.topics,
+          tokenEstimate: summary.tokenEstimate,
+        })
+      }
+    }
+
+    // 2. Get notes from notes plugin state (if available)
+    // We read notes plugin state directly to enable unified selection
+    try {
+      const notesState = await context.getState<NotesState>(scope)
+      if (notesState?.notes.length) {
+        for (const note of notesState.notes) {
+          sources.push({
+            type: 'note',
+            id: note.id,
+            preview: note.content.slice(0, 150) + (note.content.length > 150 ? '...' : ''),
+            content: formatNoteForInjection(note),
+            tokenEstimate: estimateTokens(note.content),
+          })
+        }
+      }
+    } catch {
+      // Notes plugin may not be loaded - that's fine
+      logger.debug('Could not read notes state - notes plugin may not be loaded')
+    }
+
+    if (sources.length === 0) {
       return []
     }
 
-    // Inject summaries at high depth (near start of context)
-    // Each summary gets its own injection, ordered by age
-    return state.summaries.map((summary, index) => ({
-      id: `compaction:summary:${summary.id}`,
-      content: formatSummaryForInjection(summary),
-      targetDepth: -5 - index,  // Negative depth = from start of context
-      priority: 50,  // Lower than notes (100)
-      lastModifiedAt: state.lastCompactionMessageId,
+    // 3. If below threshold or selection disabled, inject all (up to max)
+    let selectedSources = sources
+
+    if (config.enable_selection && sources.length > config.selection_threshold) {
+      // Get recent messages for topic context
+      const recentContext = getRecentContextPreview(context)
+
+      // Call LLM to select relevant sources
+      selectedSources = await selectRelevantSources(
+        sources,
+        recentContext,
+        config.selection_model,
+        config.max_injections
+      )
+
+      logger.info({
+        totalSources: sources.length,
+        selectedCount: selectedSources.length,
+        selectedIds: selectedSources.map(s => s.id),
+      }, 'Selected relevant context sources')
+    } else if (sources.length > config.max_injections) {
+      // No selection but too many - take most recent
+      selectedSources = sources.slice(-config.max_injections)
+    }
+
+    // 4. Build injections from selected sources
+    // Notes get higher priority than summaries
+    return selectedSources.map((source, index) => ({
+      id: `compaction:${source.type}:${source.id}`,
+      content: source.content,
+      targetDepth: -5 - index,
+      priority: source.type === 'note' ? 80 : 50,
+      lastModifiedAt: compactionState?.lastCompactionMessageId,
     }))
   },
 
@@ -162,6 +258,94 @@ function formatSummaryForInjection(summary: Summary): string {
     summary.summary,
     '</earlier-context>',
   ].join('\n')
+}
+
+/**
+ * Format a note for context injection
+ */
+function formatNoteForInjection(note: Note): string {
+  return [
+    `<note id="${note.id}">`,
+    note.content,
+    '</note>',
+  ].join('\n')
+}
+
+/**
+ * Get a preview of recent context for topic detection
+ */
+function getRecentContextPreview(context: PluginStateContext): string {
+  // Use the last few message IDs from context to give the LLM topic hints
+  // We don't have message content here, but we have the triggering message context
+  const messageIds = Array.from(context.contextMessageIds).slice(-5)
+  return `Recent message IDs: ${messageIds.join(', ')} (channel: ${context.channelId})`
+}
+
+/**
+ * Use LLM to select relevant sources based on current topic
+ */
+async function selectRelevantSources(
+  sources: ContextSource[],
+  recentContext: string,
+  model: string,
+  maxSelections: number
+): Promise<ContextSource[]> {
+  try {
+    const client = getAnthropicClient()
+
+    // Build source list for selection
+    const sourceList = sources.map((s, i) => {
+      const topicsStr = s.topics?.length ? ` [topics: ${s.topics.join(', ')}]` : ''
+      return `${i + 1}. [${s.type}] ${s.preview}${topicsStr}`
+    }).join('\n')
+
+    const prompt = `You are selecting which context sources are most relevant to inject into an ongoing conversation.
+
+Current context: ${recentContext}
+
+Available sources (${sources.length} total):
+${sourceList}
+
+Select up to ${maxSelections} sources that would be most relevant and useful for the current conversation.
+Consider:
+- Topic relevance to recent discussion
+- Important decisions or facts that should be remembered
+- Ongoing tasks or commitments
+
+Respond with ONLY the numbers of the sources to include, comma-separated.
+Example: 1, 3, 5
+
+If none are relevant, respond with: NONE`
+
+    const response = await client.messages.create({
+      model,
+      max_tokens: 100,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    const text = response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map(block => block.text)
+      .join('')
+      .trim()
+
+    if (text === 'NONE') {
+      return []
+    }
+
+    // Parse selected indices
+    const selectedIndices = text
+      .split(',')
+      .map(s => parseInt(s.trim(), 10) - 1)  // Convert to 0-indexed
+      .filter(i => !isNaN(i) && i >= 0 && i < sources.length)
+
+    // Return selected sources
+    return selectedIndices.map(i => sources[i]!)
+  } catch (error) {
+    logger.error({ error, model }, 'Failed to select relevant sources - falling back to all')
+    // On error, return most recent sources up to max
+    return sources.slice(-maxSelections)
+  }
 }
 
 /**

@@ -51,14 +51,23 @@ max_images: 2
 tools_enabled: true
 tool_plugins: ['notes', 'brave-search', 'compaction']
 
-# Compaction plugin config (auto-summarizes old context)
+# Plugin configuration
 plugin_config:
+  # Notes: disable injection since compaction handles it with intelligent selection
+  notes:
+    inject_into_context: false
+  # Compaction: auto-summarizes old context + intelligently selects what to inject
   compaction:
     enabled: true
     threshold_percent: 80
     summary_model: claude-haiku-4-5-20251001
     max_summaries: 15
     messages_per_summary: 25
+    # Intelligent selection
+    enable_selection: true
+    selection_model: claude-haiku-4-5-20251001
+    selection_threshold: 5    # Only run selection if >5 sources
+    max_injections: 5         # Inject at most 5 relevant sources
 
 # Retry configuration
 llm_retries: 3
