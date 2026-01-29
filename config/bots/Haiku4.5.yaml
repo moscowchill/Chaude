@@ -33,13 +33,13 @@ system_prompt: |
 
 # Model configuration
 mode: chat
-continuation_model: claude-haiku-4-5-20251001
+continuation_model: claude-sonnet-4-20250514  # Main responses - higher rate limits
 temperature: 0.7  # Balance between factual and creative
 max_tokens: 4096
 
-# Context configuration
-recency_window_messages: 400
-recency_window_characters: 100000
+# Context configuration (reduced to stay under rate limits)
+recency_window_messages: 200
+recency_window_characters: 50000  # ~14k tokens - leaves room for summaries
 rolling_threshold: 50
 recent_participant_count: 10
 
@@ -47,9 +47,18 @@ recent_participant_count: 10
 include_images: true
 max_images: 2
 
-# Tool configuration (only notes needed for observer)
+# Tool configuration
 tools_enabled: true
-tool_plugins: ['notes', 'brave-search']
+tool_plugins: ['notes', 'brave-search', 'compaction']
+
+# Compaction plugin config (auto-summarizes old context)
+plugin_config:
+  compaction:
+    enabled: true
+    threshold_percent: 80
+    summary_model: claude-haiku-4-5-20251001
+    max_summaries: 15
+    messages_per_summary: 25
 
 # Retry configuration
 llm_retries: 3

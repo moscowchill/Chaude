@@ -44,6 +44,49 @@ export interface ToolPlugin {
    * Use to set up initial state or inherit from parent.
    */
   onInit?: (context: PluginStateContext) => Promise<void>
+
+  /**
+   * Called after a successful activation completes (response sent to Discord).
+   * Runs in background - not awaited. Use for background tasks like context compaction.
+   * @param context Plugin state context
+   * @param result Activation result metadata
+   */
+  onPostActivation?: (
+    context: PluginStateContext,
+    result: ActivationResult
+  ) => Promise<void>
+}
+
+/**
+ * Metadata about a completed activation, passed to onPostActivation hooks.
+ */
+export interface ActivationResult {
+  /** Whether the activation succeeded */
+  success: boolean
+  /** Channel ID */
+  channelId: string
+  /** Guild ID */
+  guildId: string
+  /** Triggering message ID */
+  triggeringMessageId?: string
+  /** Number of messages in context */
+  messageCount: number
+  /** Approximate token usage */
+  tokenUsage: {
+    inputTokens: number
+    outputTokens: number
+  }
+  /** Number of tool calls made */
+  toolCallCount: number
+  /** IDs of messages sent by the bot */
+  sentMessageIds: string[]
+  /** Messages that were in context (for compaction plugin) */
+  contextMessages?: Array<{
+    id: string
+    author: string
+    content: string
+    timestamp: string
+  }>
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

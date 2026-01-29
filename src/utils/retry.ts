@@ -89,6 +89,96 @@ export async function retryLLM<T>(
 }
 
 /**
+ * Extract retry-after duration from a rate limit error.
+ * Returns undefined if not a rate limit error or no retry-after header.
+ */
+function extractRetryAfter(error: unknown): number | undefined {
+  const details = (error as { details?: unknown })?.details as Record<string, unknown> | undefined
+  const status = details?.status as number | undefined
+  const headers = details?.headers as Record<string, string> | undefined
+  const apiError = (details?.error as Record<string, unknown>)?.error as Record<string, unknown> | undefined
+  const errorType = apiError?.type as string | undefined
+
+  // Check if it's a rate limit error
+  if (status !== 429 && errorType !== 'rate_limit_error') {
+    return undefined
+  }
+
+  // Try to extract retry-after header
+  const retryAfterStr = headers?.['retry-after']
+  if (retryAfterStr) {
+    const seconds = parseInt(retryAfterStr, 10)
+    if (!isNaN(seconds) && seconds > 0) {
+      return seconds * 1000 // Convert to milliseconds
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Retry for LLM calls with rate-limit awareness.
+ * Respects retry-after header from 429 responses instead of fixed backoff.
+ */
+export async function retryLLMWithRateLimit<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number = 3
+): Promise<T> {
+  let lastError: Error | undefined
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn()
+    } catch (error) {
+      lastError = error as Error
+
+      if (attempt === maxAttempts) {
+        break
+      }
+
+      // Check for rate limit with retry-after
+      const retryAfterMs = extractRetryAfter(error)
+
+      if (retryAfterMs !== undefined) {
+        // Rate limit - wait the specified duration
+        // Cap at 5 minutes to avoid extremely long waits
+        const waitMs = Math.min(retryAfterMs, 5 * 60 * 1000)
+
+        logger.warn(
+          {
+            error: lastError.message,
+            attempt,
+            maxAttempts,
+            retryAfterMs,
+            waitMs,
+          },
+          'Rate limited - waiting before retry'
+        )
+
+        await sleep(waitMs)
+      } else {
+        // Not a rate limit or no retry-after - use short fixed delay
+        const delayMs = 1000
+
+        logger.warn(
+          {
+            error: lastError.message,
+            attempt,
+            maxAttempts,
+            delayMs,
+          },
+          'Retrying after error'
+        )
+
+        await sleep(delayMs)
+      }
+    }
+  }
+
+  throw lastError
+}
+
+/**
  * Retry for Discord API calls (exponential backoff with cap)
  */
 export async function retryDiscord<T>(
