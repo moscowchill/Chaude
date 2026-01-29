@@ -31,40 +31,33 @@ const MAX_PDF_OUTPUT_CHARS = 30_000  // 30K chars max from PDF (context safety)
 const MAX_PDF_PAGES_FULL = 10  // PDFs over this get a "too long" warning
 
 // Dynamic import for pdf-parse (optional dependency)
+// Using v1.x API which is more stable in Node.js
 type PdfParseResult = { text: string; numPages: number }
-type PdfParseClass = new (options: { data: Buffer }) => { getText: () => Promise<{ text: string }>; getInfo: () => Promise<{ numPages: number }>; destroy: () => Promise<void> }
-let PdfParse: PdfParseClass | null | undefined = null
+type PdfParseFn = (buffer: Buffer) => Promise<{ text: string; numpages: number }>
+let pdfParseFn: PdfParseFn | null | undefined = null
 
-async function loadPdfParse(): Promise<PdfParseClass | null> {
-  if (PdfParse === null) {
+async function loadPdfParse(): Promise<PdfParseFn | null> {
+  if (pdfParseFn === null) {
     try {
       const module = await import('pdf-parse')
-      PdfParse = module.PDFParse as unknown as PdfParseClass
+      pdfParseFn = module.default as PdfParseFn
     } catch {
-      PdfParse = undefined
+      pdfParseFn = undefined
     }
   }
-  return PdfParse ?? null
+  return pdfParseFn ?? null
 }
 
 async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
-  const PdfParseClass = await loadPdfParse()
-  if (!PdfParseClass) {
+  const parse = await loadPdfParse()
+  if (!parse) {
     throw new Error('PDF support not available')
   }
 
-  const parser = new PdfParseClass({ data: buffer })
-  try {
-    const [textResult, infoResult] = await Promise.all([
-      parser.getText(),
-      parser.getInfo(),
-    ])
-    return {
-      text: textResult.text,
-      numPages: infoResult.numPages,
-    }
-  } finally {
-    await parser.destroy()
+  const result = await parse(buffer)
+  return {
+    text: result.text,
+    numPages: result.numpages,
   }
 }
 
@@ -400,16 +393,33 @@ export class DiscordConnector {
       
       // Track whether we've hit the image cap to avoid unnecessary processing
       const imageLimitReached = () => maxImages !== undefined && images.length >= maxImages
-      
+
+      // Find the bot's last message to only process new document attachments
+      // (prevents re-reading PDFs/files the bot has already seen)
+      const botUserId = this.client.user?.id
+      let lastBotMessageIndex = -1
+      if (botUserId) {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i]!.author.id === botUserId) {
+            lastBotMessageIndex = i
+            break
+          }
+        }
+      }
+
       // Iterate newest-first so image cap keeps recent images (context builder wants recent ones)
       // Messages array is chronological (oldest-first), so we reverse for image fetching
       for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]!
         const attachments = Array.from(msg.attachments.values())
-        
+
+        // Only process document attachments from messages AFTER the bot's last response
+        // This prevents re-reading PDFs/files on every activation
+        const isNewMessage = i > lastBotMessageIndex
+
         for (const attachment of attachments) {
           if (attachment.contentType?.startsWith('image/')) {
-            // Skip image fetching if we've already hit the cap
+            // Images are always processed (for visual context)
             if (imageLimitReached()) {
               continue
             }
@@ -421,12 +431,25 @@ export class DiscordConnector {
                 newImagesDownloaded++
               }
             }
-          } else if (this.isPdfAttachment(attachment)) {
+          } else if (isNewMessage && this.isPdfAttachment(attachment)) {
+            // Only process PDFs from new messages
+            logger.debug({
+              messageId: msg.id,
+              filename: attachment.name,
+              contentType: attachment.contentType,
+              size: attachment.size
+            }, 'Processing new PDF attachment')
             const doc = await this.fetchPdfAttachment(attachment, msg.id)
             if (doc) {
               documents.push(doc)
             }
-          } else if (this.isTextAttachment(attachment)) {
+          } else if (isNewMessage && this.isTextAttachment(attachment)) {
+            // Only process text files from new messages
+            logger.debug({
+              messageId: msg.id,
+              filename: attachment.name,
+              size: attachment.size
+            }, 'Processing new text attachment')
             const doc = await this.fetchTextAttachment(attachment, msg.id)
             if (doc) {
               documents.push(doc)
@@ -1774,8 +1797,8 @@ export class DiscordConnector {
     }
 
     // Check if pdf-parse is available
-    const PdfParseClass = await loadPdfParse()
-    if (!PdfParseClass) {
+    const pdfParser = await loadPdfParse()
+    if (!pdfParser) {
       logger.warn({ url: attachment.url }, 'PDF attachment skipped - pdf-parse not installed')
       return null
     }
@@ -1833,7 +1856,9 @@ export class DiscordConnector {
         truncated,
       }
     } catch (error) {
-      logger.warn({ error, url: attachment.url }, 'Failed to parse PDF attachment')
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      const errorStack = error instanceof Error ? error.stack : undefined
+      logger.warn({ error: errorMsg, stack: errorStack, url: attachment.url }, 'Failed to parse PDF attachment')
       return null
     }
   }

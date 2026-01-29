@@ -45,47 +45,34 @@ interface ReadFileInput {
 }
 
 // Dynamic import for pdf-parse (optional dependency)
-// Note: pdf-parse v2.x uses a class-based API (PDFParse) that differs from
-// @types/pdf-parse which targets v1.x's function-based API. We use a custom
-// type definition and cast with `as unknown as PdfParseClass` to handle this
-// mismatch. The runtime behavior is correct for pdf-parse v2.x.
+// Using v1.x API which is more stable in Node.js
 type PdfParseResult = { text: string; numPages: number }
-type PdfParseClass = new (options: { data: Buffer }) => { getText: () => Promise<{ text: string }>; getInfo: () => Promise<{ numPages: number }>; destroy: () => Promise<void> }
-let PdfParse: PdfParseClass | null | undefined = null
+type PdfParseFn = (buffer: Buffer) => Promise<{ text: string; numpages: number }>
+let pdfParseFn: PdfParseFn | null | undefined = null
 
-async function loadPdfParse(): Promise<PdfParseClass | null> {
-  if (PdfParse === null) {
+async function loadPdfParse(): Promise<PdfParseFn | null> {
+  if (pdfParseFn === null) {
     try {
       const module = await import('pdf-parse')
-      // Cast needed due to type definition mismatch between @types/pdf-parse (v1.x API)
-      // and actual pdf-parse v2.x class-based API
-      PdfParse = module.PDFParse as unknown as PdfParseClass
+      pdfParseFn = module.default as PdfParseFn
     } catch {
       // pdf-parse not installed
-      PdfParse = undefined
+      pdfParseFn = undefined
     }
   }
-  return PdfParse ?? null
+  return pdfParseFn ?? null
 }
 
 async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
-  const PdfParseClass = await loadPdfParse()
-  if (!PdfParseClass) {
+  const parse = await loadPdfParse()
+  if (!parse) {
     throw new Error('PDF support not available')
   }
 
-  const parser = new PdfParseClass({ data: buffer })
-  try {
-    const [textResult, infoResult] = await Promise.all([
-      parser.getText(),
-      parser.getInfo(),
-    ])
-    return {
-      text: textResult.text,
-      numPages: infoResult.numPages,
-    }
-  } finally {
-    await parser.destroy()
+  const result = await parse(buffer)
+  return {
+    text: result.text,
+    numPages: result.numpages,
   }
 }
 
@@ -153,8 +140,8 @@ Maximum output is ~100,000 characters (truncated if exceeded).`,
 
       if (isPdf) {
         // Handle PDF files
-        const PdfParseClass = await loadPdfParse()
-        if (!PdfParseClass) {
+        const pdfParser = await loadPdfParse()
+        if (!pdfParser) {
           return 'Error: PDF support not available. Install pdf-parse package: npm install pdf-parse'
         }
 
