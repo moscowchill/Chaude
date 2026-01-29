@@ -30,8 +30,8 @@ recent_participant_count: 10
 include_images: true
 max_images: 2
 
-# Text attachments - don't auto-include, use read_file tool when asked
-include_text_attachments: false
+# Text/PDF attachments - auto-include (PDFs capped at 50k chars)
+include_text_attachments: true
 max_message_chars: 3000  # Truncate messages over 3k chars (prevents text dumps eating context)
 
 # Tool configuration

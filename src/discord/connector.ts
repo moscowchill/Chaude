@@ -26,6 +26,47 @@ export interface ConnectorOptions {
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
+const MAX_PDF_DOWNLOAD_BYTES = 10 * 1024 * 1024  // 10 MB max PDF download
+const MAX_PDF_OUTPUT_CHARS = 30_000  // 30K chars max from PDF (context safety)
+const MAX_PDF_PAGES_FULL = 10  // PDFs over this get a "too long" warning
+
+// Dynamic import for pdf-parse (optional dependency)
+type PdfParseResult = { text: string; numPages: number }
+type PdfParseClass = new (options: { data: Buffer }) => { getText: () => Promise<{ text: string }>; getInfo: () => Promise<{ numPages: number }>; destroy: () => Promise<void> }
+let PdfParse: PdfParseClass | null | undefined = null
+
+async function loadPdfParse(): Promise<PdfParseClass | null> {
+  if (PdfParse === null) {
+    try {
+      const module = await import('pdf-parse')
+      PdfParse = module.PDFParse as unknown as PdfParseClass
+    } catch {
+      PdfParse = undefined
+    }
+  }
+  return PdfParse ?? null
+}
+
+async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
+  const PdfParseClass = await loadPdfParse()
+  if (!PdfParseClass) {
+    throw new Error('PDF support not available')
+  }
+
+  const parser = new PdfParseClass({ data: buffer })
+  try {
+    const [textResult, infoResult] = await Promise.all([
+      parser.getText(),
+      parser.getInfo(),
+    ])
+    return {
+      text: textResult.text,
+      numPages: infoResult.numPages,
+    }
+  } finally {
+    await parser.destroy()
+  }
+}
 
 export interface FetchContextParams {
   channelId: string
@@ -380,6 +421,11 @@ export class DiscordConnector {
                 newImagesDownloaded++
               }
             }
+          } else if (this.isPdfAttachment(attachment)) {
+            const doc = await this.fetchPdfAttachment(attachment, msg.id)
+            if (doc) {
+              documents.push(doc)
+            }
           } else if (this.isTextAttachment(attachment)) {
             const doc = await this.fetchTextAttachment(attachment, msg.id)
             if (doc) {
@@ -388,7 +434,7 @@ export class DiscordConnector {
           }
         }
       }
-      
+
       if (newImagesDownloaded > 0) {
         this.saveUrlMap()
         logger.debug({ newImagesDownloaded }, 'Saved URL map after new downloads')
@@ -1701,6 +1747,93 @@ export class DiscordConnector {
       return cached
     } catch (error) {
       logger.warn({ error, url }, 'Failed to cache image')
+      return null
+    }
+  }
+
+  /**
+   * Check if attachment is a PDF
+   */
+  private isPdfAttachment(attachment: Attachment): boolean {
+    if (attachment.contentType === 'application/pdf') {
+      return true
+    }
+    const name = attachment.name?.toLowerCase() || ''
+    return name.endsWith('.pdf')
+  }
+
+  /**
+   * Fetch and parse PDF attachment
+   */
+  private async fetchPdfAttachment(attachment: Attachment, messageId: string): Promise<CachedDocument | null> {
+    // Check size limit
+    if (attachment.size && attachment.size > MAX_PDF_DOWNLOAD_BYTES) {
+      const sizeMB = (attachment.size / 1024 / 1024).toFixed(1)
+      logger.warn({ size: attachment.size, sizeMB, url: attachment.url }, 'Skipping oversized PDF attachment')
+      return null
+    }
+
+    // Check if pdf-parse is available
+    const PdfParseClass = await loadPdfParse()
+    if (!PdfParseClass) {
+      logger.warn({ url: attachment.url }, 'PDF attachment skipped - pdf-parse not installed')
+      return null
+    }
+
+    try {
+      const response = await fetch(attachment.url)
+      if (!response.ok) {
+        logger.warn({ status: response.status, url: attachment.url }, 'Failed to fetch PDF attachment')
+        return null
+      }
+
+      const arrayBuffer = await response.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+
+      // Parse PDF
+      const pdfData = await parsePdf(buffer)
+      const isLargePdf = pdfData.numPages > MAX_PDF_PAGES_FULL
+      let truncated = false
+
+      // Build header based on size
+      let header: string
+      if (isLargePdf) {
+        header = `[PDF: ${pdfData.numPages} pages - TOO LONG, showing beginning only]\n\n`
+        truncated = true
+      } else {
+        header = `[PDF: ${pdfData.numPages} page${pdfData.numPages === 1 ? '' : 's'}]\n\n`
+      }
+
+      let text = header + pdfData.text
+
+      // Truncate if too long
+      if (text.length > MAX_PDF_OUTPUT_CHARS) {
+        const suffix = isLargePdf
+          ? `\n\n[... PDF too long (${pdfData.numPages} pages). Only showing first ~${Math.round(MAX_PDF_OUTPUT_CHARS / 1000)}K chars. Ask user for specific sections or page numbers.]`
+          : `\n\n[... truncated to ${MAX_PDF_OUTPUT_CHARS.toLocaleString()} chars]`
+        text = text.slice(0, MAX_PDF_OUTPUT_CHARS) + suffix
+        truncated = true
+      }
+
+      logger.info({
+        url: attachment.url,
+        pages: pdfData.numPages,
+        originalLength: pdfData.text.length,
+        outputLength: text.length,
+        truncated
+      }, 'PDF attachment parsed')
+
+      return {
+        messageId,
+        url: attachment.url,
+        filename: attachment.name || 'document.pdf',
+        contentType: 'application/pdf',
+        size: attachment.size,
+        text,
+        truncated,
+      }
+    } catch (error) {
+      logger.warn({ error, url: attachment.url }, 'Failed to parse PDF attachment')
       return null
     }
   }
