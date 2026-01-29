@@ -626,16 +626,27 @@ export class ContextBuilder {
       return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
-    // If not rolling yet, allow normal limits to be exceeded (for cache efficiency)
+    // If not rolling yet, still enforce limits if exceeded (prevents rate limit errors)
+    // Only skip enforcement if we're under the normal limit
     if (!shouldRoll) {
-      logger.debug({
-        messagesSinceRoll,
-        threshold: config.rolling_threshold,
-        messageCount: messages.length,
+      if (totalChars <= normalLimit) {
+        logger.debug({
+          messagesSinceRoll,
+          threshold: config.rolling_threshold,
+          messageCount: messages.length,
+          totalChars,
+          totalMB: (totalChars / 1024 / 1024).toFixed(2)
+        }, 'Not rolling yet - keeping all messages for cache')
+        return { messages, didTruncate: false, messagesRemoved: 0 }
+      }
+      // Over limit even on first activation - must truncate to avoid rate limits
+      logger.info({
         totalChars,
-        totalMB: (totalChars / 1024 / 1024).toFixed(2)
-      }, 'Not rolling yet - keeping all messages for cache')
-      return { messages, didTruncate: false, messagesRemoved: 0 }
+        limit: normalLimit,
+        messageCount: messages.length
+      }, 'First activation but over limit - truncating to avoid rate limits')
+      const result = this.truncateToLimit(messages, normalLimit, true)
+      return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
     // Time to roll - check normal limits
