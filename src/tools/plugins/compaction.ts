@@ -129,9 +129,9 @@ const plugin: ToolPlugin = {
     }
 
     // 2. Get notes from notes plugin state (if available)
-    // We read notes plugin state directly to enable unified selection
+    // Use cross-plugin state access to read from the notes plugin
     try {
-      const notesState = await context.getState<NotesState>(scope)
+      const notesState = await context.getPluginState<NotesState>('notes', scope)
       if (notesState?.notes.length) {
         for (const note of notesState.notes) {
           sources.push({
@@ -417,6 +417,22 @@ async function runCompaction(
   while (state.summaries.length > config.max_summaries) {
     const removed = state.summaries.shift()
     logger.debug({ removedId: removed?.id }, 'Pruned old summary')
+  }
+
+  // Prune summarizedMessageIds to prevent unbounded growth
+  // Keep only IDs that fall within the range of remaining summaries
+  if (state.summaries.length > 0) {
+    const oldestStart = state.summaries[0]!.messageRange.start
+    const beforeCount = state.summarizedMessageIds.length
+    state.summarizedMessageIds = state.summarizedMessageIds.filter(
+      id => id >= oldestStart
+    )
+    if (state.summarizedMessageIds.length < beforeCount) {
+      logger.debug({
+        before: beforeCount,
+        after: state.summarizedMessageIds.length,
+      }, 'Pruned stale summarizedMessageIds')
+    }
   }
 
   await context.setState(scope, state)

@@ -16,7 +16,7 @@ system_prompt: |
 
 # Model configuration
 mode: chat
-continuation_model: claude-sonnet-4-20250514  # Main responses - higher rate limits
+continuation_model: claude-sonnet-4-5-20250929  # Main responses - higher rate limits
 temperature: 0.7  # Balance between factual and creative
 max_tokens: 4096
 

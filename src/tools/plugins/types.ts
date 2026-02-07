@@ -222,6 +222,13 @@ export interface PluginStateContext extends PluginContext {
   configuredScope: StateScope
 
   /**
+   * Read state from another plugin (cross-plugin state access).
+   * Useful for plugins that need to aggregate data from other plugins
+   * (e.g., compaction reading notes for unified context selection).
+   */
+  getPluginState<T>(pluginName: string, scope: StateScope): Promise<T | null>
+
+  /**
    * Make an LLM completion request through the framework's middleware.
    * This is provider-agnostic and benefits from retry logic and tracing.
    * Optional - may not be available in all contexts.
