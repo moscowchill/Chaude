@@ -30,6 +30,8 @@ interface CompactionState {
   lastCompactionMessageId: string | null
   /** Message IDs that have been summarized (to avoid re-summarizing) */
   summarizedMessageIds: string[]
+  /** Cached preview of recent conversation for selection context (updated each activation) */
+  recentConversationPreview?: string
 }
 
 interface CompactionConfig {
@@ -81,6 +83,8 @@ interface ContextSource {
   content: string      // Full content for injection
   topics?: string[]    // Topics (summaries only)
   tokenEstimate: number
+  /** Message ID when this source was created/modified (for injection depth aging) */
+  sourceMessageId?: string
 }
 
 /**
@@ -124,6 +128,7 @@ const plugin: ToolPlugin = {
           content: formatSummaryForInjection(summary),
           topics: summary.topics,
           tokenEstimate: summary.tokenEstimate,
+          sourceMessageId: summary.messageRange.end,  // Use end of summarized range
         })
       }
     }
@@ -140,6 +145,7 @@ const plugin: ToolPlugin = {
             preview: note.content.slice(0, 150) + (note.content.length > 150 ? '...' : ''),
             content: formatNoteForInjection(note),
             tokenEstimate: estimateTokens(note.content),
+            sourceMessageId: note.createdByMessageId,  // Note's own creation message
           })
         }
       }
@@ -157,7 +163,7 @@ const plugin: ToolPlugin = {
 
     if (config.enable_selection && sources.length > config.selection_threshold) {
       // Get recent messages for topic context
-      const recentContext = getRecentContextPreview(context)
+      const recentContext = await getRecentContextPreview(context)
 
       // Call LLM to select relevant sources
       selectedSources = await selectRelevantSources(
@@ -179,13 +185,19 @@ const plugin: ToolPlugin = {
     }
 
     // 4. Build injections from selected sources
-    // Notes get higher priority than summaries
-    return selectedSources.map((source, index) => ({
+    // Notes go closer to current conversation (depth 5-9 from end)
+    // Summaries provide background context slightly deeper (depth 10-14 from end)
+    // Positive depth = from end (latest messages), so lower = closer to current conversation
+    let noteIndex = 0
+    let summaryIndex = 0
+    return selectedSources.map((source) => ({
       id: `compaction:${source.type}:${source.id}`,
       content: source.content,
-      targetDepth: -5 - index,
+      targetDepth: source.type === 'note'
+        ? 5 + noteIndex++   // Notes: positions 5-9 from end (near current conversation)
+        : 10 + summaryIndex++,  // Summaries: positions 10-14 (background context)
       priority: source.type === 'note' ? 80 : 50,
-      lastModifiedAt: compactionState?.lastCompactionMessageId,
+      lastModifiedAt: source.sourceMessageId || compactionState?.lastCompactionMessageId,
     }))
   },
 
@@ -208,6 +220,30 @@ const plugin: ToolPlugin = {
       return
     }
 
+    // Always update the conversation preview for selection context
+    // This gives the selection LLM actual conversation content to match against
+    const contextMessages = result.contextMessages || []
+    if (contextMessages.length > 0) {
+      const scope = context.configuredScope
+      const state = await context.getState<CompactionState>(scope) || {
+        summaries: [],
+        lastCompactionMessageId: null,
+        summarizedMessageIds: [],
+      }
+
+      // Store last ~10 messages as preview (truncate each to 200 chars)
+      const recentMessages = contextMessages.slice(-10)
+      state.recentConversationPreview = recentMessages
+        .map(m => `[${m.author}]: ${m.content.slice(0, 200)}`)
+        .join('\n')
+
+      await context.setState(scope, state)
+      logger.debug({
+        previewMessages: recentMessages.length,
+        previewLength: state.recentConversationPreview.length,
+      }, 'Updated conversation preview for selection')
+    }
+
     // Get bot config for thresholds
     const botConfig = context.config as {
       rolling_threshold?: number
@@ -218,7 +254,6 @@ const plugin: ToolPlugin = {
     const thresholdMessages = Math.floor(rollingThreshold * (config.threshold_percent / 100))
 
     // Calculate total context characters for safety net check
-    const contextMessages = result.contextMessages || []
     const totalCharacters = contextMessages.reduce((sum, m) => sum + m.content.length, 0)
     const characterThresholdExceeded = config.threshold_characters > 0 && totalCharacters >= config.threshold_characters
 
@@ -279,13 +314,19 @@ function formatNoteForInjection(note: Note): string {
 }
 
 /**
- * Get a preview of recent context for topic detection
+ * Get a preview of recent context for topic detection.
+ * Uses cached conversation preview from onPostActivation (one activation behind).
  */
-function getRecentContextPreview(context: PluginStateContext): string {
-  // Use the last few message IDs from context to give the LLM topic hints
-  // We don't have message content here, but we have the triggering message context
-  const messageIds = Array.from(context.contextMessageIds).slice(-5)
-  return `Recent message IDs: ${messageIds.join(', ')} (channel: ${context.channelId})`
+async function getRecentContextPreview(context: PluginStateContext): Promise<string> {
+  const scope = context.configuredScope
+  const state = await context.getState<CompactionState>(scope)
+
+  if (state?.recentConversationPreview) {
+    return state.recentConversationPreview
+  }
+
+  // Fallback for first activation (no cached preview yet)
+  return `(No conversation preview available yet - channel: ${context.channelId})`
 }
 
 /**
@@ -312,23 +353,20 @@ async function selectRelevantSources(
       return `${i + 1}. [${s.type}] ${s.preview}${topicsStr}`
     }).join('\n')
 
-    const prompt = `You are selecting which context sources are most relevant to inject into an ongoing conversation.
+    const prompt = `You are selecting which saved context sources are most relevant to inject into an ongoing Discord conversation.
 
-Current context: ${recentContext}
+Recent conversation:
+${recentContext}
 
-Available sources (${sources.length} total):
+Available sources to inject (${sources.length} total):
 ${sourceList}
 
-Select up to ${maxSelections} sources that would be most relevant and useful for the current conversation.
-Consider:
-- Topic relevance to recent discussion
-- Important decisions or facts that should be remembered
-- Ongoing tasks or commitments
+Select up to ${maxSelections} sources that are most relevant to what's being discussed.
+Prioritize: notes about active tasks/decisions > topic-relevant summaries > general background.
+Always include notes about ongoing commitments or unresolved items.
 
-Respond with ONLY the numbers of the sources to include, comma-separated.
-Example: 1, 3, 5
-
-If none are relevant, respond with: NONE`
+Respond with ONLY the numbers, comma-separated. Example: 1, 3, 5
+If none are relevant, respond: NONE`
 
     const response = await context.llmComplete({
       model,
