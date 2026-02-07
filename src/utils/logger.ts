@@ -37,6 +37,7 @@ const baseLogger = pino({
 // General log file for non-activation logs
 const generalLogPath = join(logDir, 'general.log')
 const generalLogStream = createWriteStream(generalLogPath, { flags: 'a' })
+generalLogStream.on('error', () => {}) // Prevent unhandled stream errors from crashing
 const generalFileLogger = pino({
   level: 'debug',
 }, generalLogStream)
@@ -112,6 +113,7 @@ export async function withActivationLogging<T>(
   const activationId = `${channelId}:${messageId}`
   
   const stream = createWriteStream(filePath, { flags: 'a' })
+  stream.on('error', () => {}) // Prevent crashes from background tasks writing after stream close
   const activationLogger = pino({
     level: 'debug',
   }, stream)
