@@ -13,6 +13,7 @@ import { logger } from '../../utils/logger.js'
 interface Note {
   id: string
   content: string
+  category: string
   createdAt: string
   createdByMessageId: string
 }
@@ -29,13 +30,17 @@ const plugin: ToolPlugin = {
   tools: [
     {
       name: 'save_note',
-      description: 'Save a note. Notes are visible in the context and age toward a stable position.',
+      description: 'Save a note to a category cabinet. Notes are visible in the context and age toward a stable position.',
       inputSchema: {
         type: 'object',
         properties: {
           content: {
             type: 'string',
             description: 'The note content to save',
+          },
+          category: {
+            type: 'string',
+            description: 'Category/cabinet to file this note under (e.g., "architecture", "decisions", "tasks", "releases"). Defaults to "general".',
           },
         },
         required: ['content'],
@@ -53,10 +58,15 @@ const plugin: ToolPlugin = {
     },
     {
       name: 'list_notes',
-      description: 'List all saved notes with their IDs and full content',
+      description: 'List all saved notes grouped by category, optionally filtered to a specific category',
       inputSchema: {
         type: 'object',
-        properties: {},
+        properties: {
+          category: {
+            type: 'string',
+            description: 'Filter notes by category. Omit to list all notes grouped by category.',
+          },
+        },
       },
       handler: async (_input: unknown, context: PluginContext) => {
         logger.debug({ channelId: context.channelId }, 'Notes list requested')
@@ -140,14 +150,23 @@ const plugin: ToolPlugin = {
       return []
     }
     
-    // Format notes for display
-    const notesContent = [
-      '## 📝 Saved Notes',
-      '',
-      ...state.notes.map((note, i) => `${i + 1}. [${note.id}] ${note.content}`),
-      '',
-      '_Use save_note/delete_note to manage notes._',
-    ].join('\n')
+    // Group notes by category for display
+    const categories = new Map<string, Note[]>()
+    for (const note of state.notes) {
+      const cat = note.category || 'general'
+      if (!categories.has(cat)) categories.set(cat, [])
+      categories.get(cat)!.push(note)
+    }
+
+    const sections: string[] = ['## Saved Notes', '']
+    for (const [category, notes] of categories) {
+      sections.push(`### ${category} (${notes.length})`)
+      sections.push(...notes.map(note => `- [${note.id}] ${note.content}`))
+      sections.push('')
+    }
+    sections.push('_Use save_note/delete_note to manage notes._')
+
+    const notesContent = sections.join('\n')
     
     return [{
       id: 'notes-display',
@@ -176,21 +195,26 @@ const plugin: ToolPlugin = {
     }
     
     if (toolName === 'save_note') {
+      const rawCategory = (inputObj.category as string) || 'general'
+      const category = rawCategory.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'general'
+
       const newNote: Note = {
         id: `note_${Date.now().toString(36)}`,
         content: inputObj.content as string,
+        category,
         createdAt: new Date().toISOString(),
         createdByMessageId: context.currentMessageId,
       }
-      
+
       state.notes.push(newNote)
       state.lastModifiedMessageId = context.currentMessageId
-      
+
       await context.setState(scope, state)
-      logger.info({ 
-        noteId: newNote.id, 
+      logger.info({
+        noteId: newNote.id,
+        category,
         channelId: context.channelId,
-        scope 
+        scope
       }, 'Note saved')
     }
     
@@ -261,13 +285,39 @@ const plugin: ToolPlugin = {
     if (toolName === 'list_notes') {
       const scope = context.configuredScope
       const state = await context.getState<NotesState>(scope)
-      
+
       if (!state?.notes.length) {
         return 'No notes saved yet. Use save_note to create one.'
       }
-      
-      return `**${state.notes.length} notes:**\n\n` +
-        state.notes.map((n, i) => `${i + 1}. [${n.id}] ${n.content}`).join('\n\n')
+
+      const filterCategory = inputObj.category
+        ? (inputObj.category as string).toLowerCase().trim().replace(/\s+/g, '-')
+        : null
+
+      const grouped = new Map<string, Note[]>()
+      for (const note of state.notes) {
+        const cat = note.category || 'general'
+        if (filterCategory && cat !== filterCategory) continue
+        if (!grouped.has(cat)) grouped.set(cat, [])
+        grouped.get(cat)!.push(note)
+      }
+
+      if (grouped.size === 0) {
+        return filterCategory
+          ? `No notes found in category "${filterCategory}".`
+          : 'No notes saved yet.'
+      }
+
+      const sections: string[] = []
+      for (const [category, notes] of grouped) {
+        sections.push(`**${category}** (${notes.length} notes)`)
+        for (const n of notes) {
+          sections.push(`  - [${n.id}] ${n.content}`)
+        }
+        sections.push('')
+      }
+
+      return sections.join('\n')
     }
     
     return result

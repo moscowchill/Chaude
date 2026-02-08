@@ -45,7 +45,8 @@ interface CompactionConfig {
   enable_selection?: boolean        // Enable LLM-driven selection (default: true)
   selection_model?: string          // Model for selection (default: same as summary_model)
   selection_threshold?: number      // Only select if more than N sources (default: 5)
-  max_injections?: number           // Max sources to inject after selection (default: 5)
+  max_injections?: number           // Max summary sources to inject after selection (default: 5)
+  max_cabinet_selections?: number   // Max note cabinets to inject after selection (default: 3)
 }
 
 const DEFAULT_CONFIG: Required<CompactionConfig> = {
@@ -59,12 +60,14 @@ const DEFAULT_CONFIG: Required<CompactionConfig> = {
   selection_model: 'claude-haiku-4-5-20251001',
   selection_threshold: 5,
   max_injections: 5,
+  max_cabinet_selections: 3,
 }
 
 /** Note from notes plugin */
 interface Note {
   id: string
   content: string
+  category?: string    // Optional for backward compat with old state files
   createdAt: string
   createdByMessageId: string
 }
@@ -75,16 +78,24 @@ interface NotesState {
   lastModifiedMessageId: string | null
 }
 
-/** A source that can be injected (note or summary) */
-interface ContextSource {
-  type: 'note' | 'summary'
+/** A summary source that can be injected */
+interface SummarySource {
   id: string
   preview: string      // Short preview for selection prompt
   content: string      // Full content for injection
-  topics?: string[]    // Topics (summaries only)
+  topics?: string[]
   tokenEstimate: number
-  /** Message ID when this source was created/modified (for injection depth aging) */
   sourceMessageId?: string
+}
+
+/** A cabinet of notes grouped by category */
+interface CabinetSource {
+  category: string
+  noteCount: number
+  preview: string           // "[category] N notes: preview1; preview2..."
+  notes: Note[]
+  totalTokenEstimate: number
+  latestMessageId?: string  // Most recent note's message ID (for injection depth)
 }
 
 /**
@@ -102,8 +113,8 @@ const plugin: ToolPlugin = {
   tools: [],
 
   /**
-   * Inject selected summaries and notes into context.
-   * Uses LLM-driven selection when there are many sources.
+   * Inject selected summaries and note cabinets into context.
+   * Groups notes by category into cabinets, then uses LLM to select relevant cabinets + summaries.
    */
   getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
     const config = { ...DEFAULT_CONFIG, ...context.pluginConfig } as Required<CompactionConfig>
@@ -114,91 +125,128 @@ const plugin: ToolPlugin = {
 
     const scope = context.configuredScope
 
-    // Gather all context sources
-    const sources: ContextSource[] = []
-
     // 1. Get summaries from compaction state
+    const summarySources: SummarySource[] = []
     const compactionState = await context.getState<CompactionState>(scope)
     if (compactionState?.summaries.length) {
       for (const summary of compactionState.summaries) {
-        sources.push({
-          type: 'summary',
+        summarySources.push({
           id: summary.id,
           preview: summary.summary.slice(0, 150) + (summary.summary.length > 150 ? '...' : ''),
           content: formatSummaryForInjection(summary),
           topics: summary.topics,
           tokenEstimate: summary.tokenEstimate,
-          sourceMessageId: summary.messageRange.end,  // Use end of summarized range
+          sourceMessageId: summary.messageRange.end,
         })
       }
     }
 
-    // 2. Get notes from notes plugin state (if available)
-    // Use cross-plugin state access to read from the notes plugin
+    // 2. Get notes and group into cabinets by category
+    const cabinets: CabinetSource[] = []
     try {
       const notesState = await context.getPluginState<NotesState>('notes', scope)
       if (notesState?.notes.length) {
+        const grouped = new Map<string, Note[]>()
         for (const note of notesState.notes) {
-          sources.push({
-            type: 'note',
-            id: note.id,
-            preview: note.content.slice(0, 150) + (note.content.length > 150 ? '...' : ''),
-            content: formatNoteForInjection(note),
-            tokenEstimate: estimateTokens(note.content),
-            sourceMessageId: note.createdByMessageId,  // Note's own creation message
+          const cat = note.category || 'general'
+          if (!grouped.has(cat)) grouped.set(cat, [])
+          grouped.get(cat)!.push(note)
+        }
+
+        for (const [category, notes] of grouped) {
+          const notePreviews = notes
+            .map(n => n.content.slice(0, 80) + (n.content.length > 80 ? '...' : ''))
+            .join('; ')
+          const preview = notePreviews.slice(0, 200) + (notePreviews.length > 200 ? '...' : '')
+          const totalTokens = notes.reduce((sum, n) => sum + estimateTokens(n.content), 0)
+
+          // Find the most recent note for injection depth aging
+          const latestNote = notes.reduce((latest, n) =>
+            n.createdByMessageId > (latest?.createdByMessageId || '') ? n : latest
+          , notes[0]!)
+
+          cabinets.push({
+            category,
+            noteCount: notes.length,
+            preview: `[${category}] ${notes.length} notes: ${preview}`,
+            notes,
+            totalTokenEstimate: totalTokens,
+            latestMessageId: latestNote.createdByMessageId,
           })
         }
       }
     } catch {
-      // Notes plugin may not be loaded - that's fine
       logger.debug('Could not read notes state - notes plugin may not be loaded')
     }
 
-    if (sources.length === 0) {
+    const totalSourceCount = summarySources.length + cabinets.length
+    if (totalSourceCount === 0) {
       return []
     }
 
-    // 3. If below threshold or selection disabled, inject all (up to max)
-    let selectedSources = sources
+    // 3. Selection: pick relevant cabinets + summaries
+    let selectedSummaries = summarySources
+    let selectedCabinets = cabinets
 
-    if (config.enable_selection && sources.length > config.selection_threshold) {
-      // Get recent messages for topic context
+    if (config.enable_selection && totalSourceCount > config.selection_threshold) {
       const recentContext = await getRecentContextPreview(context)
 
-      // Call LLM to select relevant sources
-      selectedSources = await selectRelevantSources(
+      const result = await selectRelevantCabinetsAndSummaries(
         context,
-        sources,
+        summarySources,
+        cabinets,
         recentContext,
         config.selection_model,
-        config.max_injections
+        config.max_injections,
+        config.max_cabinet_selections
       )
+      selectedSummaries = result.summaries
+      selectedCabinets = result.cabinets
 
       logger.info({
-        totalSources: sources.length,
-        selectedCount: selectedSources.length,
-        selectedIds: selectedSources.map(s => s.id),
-      }, 'Selected relevant context sources')
-    } else if (sources.length > config.max_injections) {
-      // No selection but too many - take most recent
-      selectedSources = sources.slice(-config.max_injections)
+        totalSummaries: summarySources.length,
+        totalCabinets: cabinets.length,
+        selectedSummaries: selectedSummaries.length,
+        selectedCabinets: selectedCabinets.map(c => c.category),
+      }, 'Selected relevant cabinets and summaries')
+    } else {
+      // Below threshold — cap to limits without LLM
+      if (cabinets.length > config.max_cabinet_selections) {
+        selectedCabinets = cabinets.slice(-config.max_cabinet_selections)
+      }
+      if (summarySources.length > config.max_injections) {
+        selectedSummaries = summarySources.slice(-config.max_injections)
+      }
     }
 
-    // 4. Build injections from selected sources
-    // Notes go closer to current conversation (depth 5-9 from end)
-    // Summaries provide background context slightly deeper (depth 10-14 from end)
-    // Positive depth = from end (latest messages), so lower = closer to current conversation
-    let noteIndex = 0
+    // 4. Build injections
+    const injections: ContextInjection[] = []
+
+    // Cabinets: near current conversation (depth 5-7)
+    let cabinetIndex = 0
+    for (const cabinet of selectedCabinets) {
+      injections.push({
+        id: `compaction:cabinet:${cabinet.category}`,
+        content: formatCabinetForInjection(cabinet),
+        targetDepth: 5 + cabinetIndex++,
+        priority: 80,
+        lastModifiedAt: cabinet.latestMessageId || compactionState?.lastCompactionMessageId,
+      })
+    }
+
+    // Summaries: deeper background context (depth 10-14)
     let summaryIndex = 0
-    return selectedSources.map((source) => ({
-      id: `compaction:${source.type}:${source.id}`,
-      content: source.content,
-      targetDepth: source.type === 'note'
-        ? 5 + noteIndex++   // Notes: positions 5-9 from end (near current conversation)
-        : 10 + summaryIndex++,  // Summaries: positions 10-14 (background context)
-      priority: source.type === 'note' ? 80 : 50,
-      lastModifiedAt: source.sourceMessageId || compactionState?.lastCompactionMessageId,
-    }))
+    for (const source of selectedSummaries) {
+      injections.push({
+        id: `compaction:summary:${source.id}`,
+        content: source.content,
+        targetDepth: 10 + summaryIndex++,
+        priority: 50,
+        lastModifiedAt: source.sourceMessageId || compactionState?.lastCompactionMessageId,
+      })
+    }
+
+    return injections
   },
 
   /**
@@ -317,14 +365,18 @@ function formatSummaryForInjection(summary: Summary): string {
 }
 
 /**
- * Format a note for context injection
+ * Format a cabinet of notes for context injection
  */
-function formatNoteForInjection(note: Note): string {
-  return [
-    `<note id="${note.id}">`,
-    note.content,
-    '</note>',
-  ].join('\n')
+function formatCabinetForInjection(cabinet: CabinetSource): string {
+  const lines = [
+    `<notes-cabinet category="${cabinet.category}" count="${cabinet.noteCount}">`,
+  ]
+  for (const note of cabinet.notes) {
+    lines.push(`[${note.id}] ${note.content}`)
+    lines.push('')
+  }
+  lines.push('</notes-cabinet>')
+  return lines.join('\n')
 }
 
 /**
@@ -344,40 +396,65 @@ async function getRecentContextPreview(context: PluginStateContext): Promise<str
 }
 
 /**
- * Use LLM to select relevant sources based on current topic.
- * Uses the framework's LLM middleware for provider-agnostic completions.
+ * Use LLM to select relevant cabinets and summaries based on current conversation.
+ * Cabinets are compact (one line per category) so the prompt stays small even with many notes.
  */
-async function selectRelevantSources(
+async function selectRelevantCabinetsAndSummaries(
   context: PluginStateContext,
-  sources: ContextSource[],
+  summaries: SummarySource[],
+  cabinets: CabinetSource[],
   recentContext: string,
   model: string,
-  maxSelections: number
-): Promise<ContextSource[]> {
-  // Fallback if LLM completion not available
+  maxSummarySelections: number,
+  maxCabinetSelections: number
+): Promise<{ summaries: SummarySource[]; cabinets: CabinetSource[] }> {
   if (!context.llmComplete) {
-    logger.warn('LLM completion not available - falling back to most recent sources')
-    return sources.slice(-maxSelections)
+    logger.warn('LLM completion not available - falling back to most recent')
+    return {
+      summaries: summaries.slice(-maxSummarySelections),
+      cabinets: cabinets.slice(0, maxCabinetSelections),
+    }
   }
 
   try {
-    // Build source list for selection
-    const sourceList = sources.map((s, i) => {
-      const topicsStr = s.topics?.length ? ` [topics: ${s.topics.join(', ')}]` : ''
-      return `${i + 1}. [${s.type}] ${s.preview}${topicsStr}`
-    }).join('\n')
+    const lines: string[] = []
+    let index = 1
+    const indexMap: Array<{ type: 'cabinet'; idx: number } | { type: 'summary'; idx: number }> = []
+
+    if (cabinets.length > 0) {
+      lines.push('NOTE CABINETS (groups of related notes):')
+      for (let i = 0; i < cabinets.length; i++) {
+        lines.push(`${index}. ${cabinets[i]!.preview}`)
+        indexMap.push({ type: 'cabinet', idx: i })
+        index++
+      }
+    }
+
+    if (summaries.length > 0) {
+      lines.push('')
+      lines.push('SUMMARIES (compressed earlier conversation):')
+      for (let i = 0; i < summaries.length; i++) {
+        const s = summaries[i]!
+        const topicsStr = s.topics?.length ? ` [topics: ${s.topics.join(', ')}]` : ''
+        lines.push(`${index}. ${s.preview}${topicsStr}`)
+        indexMap.push({ type: 'summary', idx: i })
+        index++
+      }
+    }
+
+    const sourceList = lines.join('\n')
 
     const prompt = `You are selecting which saved context sources are most relevant to inject into an ongoing Discord conversation.
 
 Recent conversation:
 ${recentContext}
 
-Available sources to inject (${sources.length} total):
+Available sources (${cabinets.length} cabinets + ${summaries.length} summaries):
 ${sourceList}
 
-Select up to ${maxSelections} sources that are most relevant to what's being discussed.
-Prioritize: notes about active tasks/decisions > topic-relevant summaries > general background.
-Always include notes about ongoing commitments or unresolved items.
+Select up to ${maxCabinetSelections} cabinets and up to ${maxSummarySelections} summaries that are most relevant to what's being discussed.
+Prioritize: cabinets about active topics/tasks > topic-relevant summaries > general background.
+Always include cabinets about ongoing commitments or unresolved items if relevant.
 
 Respond with ONLY the numbers, comma-separated. Example: 1, 3, 5
 If none are relevant, respond: NONE`
@@ -389,23 +466,34 @@ If none are relevant, respond: NONE`
     })
 
     const text = response.text.trim()
-
     if (text === 'NONE') {
-      return []
+      return { summaries: [], cabinets: [] }
     }
 
-    // Parse selected indices
     const selectedIndices = text
       .split(',')
-      .map(s => parseInt(s.trim(), 10) - 1)  // Convert to 0-indexed
-      .filter(i => !isNaN(i) && i >= 0 && i < sources.length)
+      .map(s => parseInt(s.trim(), 10) - 1)
+      .filter(i => !isNaN(i) && i >= 0 && i < indexMap.length)
 
-    // Return selected sources
-    return selectedIndices.map(i => sources[i]!)
+    const resultSummaries: SummarySource[] = []
+    const resultCabinets: CabinetSource[] = []
+
+    for (const i of selectedIndices) {
+      const entry = indexMap[i]!
+      if (entry.type === 'cabinet' && resultCabinets.length < maxCabinetSelections) {
+        resultCabinets.push(cabinets[entry.idx]!)
+      } else if (entry.type === 'summary' && resultSummaries.length < maxSummarySelections) {
+        resultSummaries.push(summaries[entry.idx]!)
+      }
+    }
+
+    return { summaries: resultSummaries, cabinets: resultCabinets }
   } catch (error) {
-    logger.error({ error, model }, 'Failed to select relevant sources - falling back to all')
-    // On error, return most recent sources up to max
-    return sources.slice(-maxSelections)
+    logger.error({ error, model }, 'Failed cabinet/summary selection - falling back')
+    return {
+      summaries: summaries.slice(-maxSummarySelections),
+      cabinets: cabinets.slice(0, maxCabinetSelections),
+    }
   }
 }
 
