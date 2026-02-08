@@ -16,7 +16,7 @@ system_prompt: |
 
 # Model configuration
 mode: chat
-continuation_model: claude-sonnet-4-5-20250929  # Main responses - higher rate limits
+continuation_model: claude-haiku-4-5-20251001  # Fast and cheap, still very capable
 temperature: 0.7  # Balance between factual and creative
 max_tokens: 4096
 
