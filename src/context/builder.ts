@@ -511,7 +511,7 @@ export class ContextBuilder {
         // Keep attachments
         lastMsg.attachments.push(...msg.attachments)
       } else {
-        merged.push({ ...msg })
+        merged.push({ ...msg, attachments: [...msg.attachments] })
       }
     }
 
@@ -940,20 +940,6 @@ export class ContextBuilder {
         })
       }
 
-      // Add document attachments only if enabled in config
-      if (config.include_text_attachments !== false) {
-        const docAttachments = documentsByMessageId.get(msg.id)
-        if (docAttachments && docAttachments.length > 0) {
-          for (const doc of docAttachments) {
-            const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
-            content.push({
-              type: 'text',
-              text: `📎 ${doc.filename}\n${doc.text}${truncatedNotice}`,
-            })
-          }
-        }
-      }
-
       // Add image content only for pre-selected messages
       if (config.include_images && messagesWithImages.has(msg.id)) {
         logger.debug({ messageId: msg.id, attachments: msg.attachments.length }, 'Adding pre-selected images for message')
@@ -1098,9 +1084,22 @@ export class ContextBuilder {
     if (imageCount > max_images) {
       const toRemove = imageCount - max_images
 
+      // Group removals by msgIndex to splice in reverse contentIndex order
+      // (prevents index shifting from invalidating subsequent splices)
+      const removalsByMsg = new Map<number, number[]>()
       for (let i = 0; i < toRemove; i++) {
         const pos = imagePositions[i]!
-        messages[pos.msgIndex]!.content.splice(pos.contentIndex, 1)
+        if (!removalsByMsg.has(pos.msgIndex)) {
+          removalsByMsg.set(pos.msgIndex, [])
+        }
+        removalsByMsg.get(pos.msgIndex)!.push(pos.contentIndex)
+      }
+
+      for (const [msgIndex, contentIndices] of removalsByMsg) {
+        contentIndices.sort((a, b) => b - a) // Descending order
+        for (const contentIndex of contentIndices) {
+          messages[msgIndex]!.content.splice(contentIndex, 1)
+        }
       }
     }
   }

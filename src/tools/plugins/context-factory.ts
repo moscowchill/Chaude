@@ -68,6 +68,7 @@ export class PluginContextFactory {
     const { channelId, currentMessageId } = baseContext
     
     // Capture these for use in closures
+    const self = this
     const messageIdSet = this.messageIdSet
     const messagePositions = this.messagePositions
     const messageIds = this.messageIds
@@ -94,6 +95,21 @@ export class PluginContextFactory {
 
       messagesSinceId,
       llmComplete: this.llmComplete,
+
+      async getPluginState<T>(otherPluginName: string, scope: StateScope): Promise<T | null> {
+        const otherManager = self.getStateManager(otherPluginName)
+        switch (scope) {
+          case 'global':
+            return otherManager.getGlobalState<T>()
+          case 'channel': {
+            const result = await otherManager.getChannelState<T>(channelId, inheritanceInfo)
+            return result.state
+          }
+          default:
+            logger.warn({ pluginId, otherPluginName, scope }, 'getPluginState only supports global/channel scope')
+            return null
+        }
+      },
 
       async getState<T>(scope: StateScope): Promise<T | null> {
         switch (scope) {

@@ -95,7 +95,13 @@ export class ToolSystem {
    */
   firePostActivationHooks(result: ActivationResult): void {
     const factory = this.pluginContextFactory as {
-      createStateContext: (pluginName: string, pluginConfig?: Record<string, unknown>) => PluginStateContext
+      createStateContext: (
+        pluginId: string,
+        baseContext: PluginContext,
+        inheritanceInfo?: unknown,
+        epicReducer?: unknown,
+        pluginConfig?: Record<string, unknown>
+      ) => PluginStateContext
     } | null
 
     if (!factory) {
@@ -103,11 +109,24 @@ export class ToolSystem {
       return
     }
 
+    // Build base context from current plugin context (set by agent loop)
+    const baseContext: PluginContext = {
+      botId: this.pluginContext.botId || '',
+      channelId: this.pluginContext.channelId || '',
+      guildId: this.pluginContext.guildId || '',
+      currentMessageId: this.pluginContext.currentMessageId || '',
+      config: this.pluginContext.config || {},
+      sendMessage: this.pluginContext.sendMessage || (async () => []),
+      pinMessage: this.pluginContext.pinMessage || (async () => {}),
+      uploadFile: this.pluginContext.uploadFile,
+      visibleImages: this.pluginContext.visibleImages,
+    }
+
     for (const [pluginName, plugin] of this.loadedPluginObjects) {
       if (plugin.onPostActivation) {
         // Run in background - don't await
         const pluginConfig = this.pluginConfigs[pluginName]
-        const context = factory.createStateContext(pluginName, pluginConfig)
+        const context = factory.createStateContext(pluginName, baseContext, undefined, undefined, pluginConfig)
 
         plugin.onPostActivation(context, result)
           .then(() => {
