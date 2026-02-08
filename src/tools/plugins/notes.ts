@@ -460,18 +460,31 @@ Respond with ONLY the JSON array, no other text.`
       return null
     }
 
-    // Sanity check: don't accept if it returned more notes than we started with
-    if (parsed.length >= notes.length) {
-      logger.debug({ category, before: notes.length, after: parsed.length }, 'Consolidation did not reduce notes — skipping')
+    // Validate entries — LLM might return malformed objects
+    const validEntries = parsed.filter(
+      (entry): entry is { content: string; category: string } =>
+        entry && typeof entry.content === 'string'
+    )
+
+    if (validEntries.length === 0) {
+      logger.warn({ category }, 'Consolidation returned no valid notes — keeping originals')
       return null
     }
 
-    const now = Date.now()
-    return parsed.map((entry, i) => ({
-      id: `note_${(now + i).toString(36)}`,
+    // Sanity check: don't accept if it returned more notes than we started with
+    if (validEntries.length >= notes.length) {
+      logger.debug({ category, before: notes.length, after: validEntries.length }, 'Consolidation did not reduce notes — skipping')
+      return null
+    }
+
+    const now = new Date()
+    const nowMs = now.getTime()
+    const nowISO = now.toISOString()
+    return validEntries.map((entry, i) => ({
+      id: `note_${(nowMs + i).toString(36)}`,
       content: entry.content,
       category: entry.category || category,
-      createdAt: new Date().toISOString(),
+      createdAt: nowISO,
       createdByMessageId: context.currentMessageId,
     }))
   } catch (error) {
