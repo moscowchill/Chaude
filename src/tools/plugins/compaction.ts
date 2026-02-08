@@ -412,7 +412,7 @@ async function selectRelevantCabinetsAndSummaries(
     logger.warn('LLM completion not available - falling back to most recent')
     return {
       summaries: summaries.slice(-maxSummarySelections),
-      cabinets: cabinets.slice(0, maxCabinetSelections),
+      cabinets: cabinets.slice(-maxCabinetSelections),
     }
   }
 
@@ -492,7 +492,7 @@ If none are relevant, respond: NONE`
     logger.error({ error, model }, 'Failed cabinet/summary selection - falling back')
     return {
       summaries: summaries.slice(-maxSummarySelections),
-      cabinets: cabinets.slice(0, maxCabinetSelections),
+      cabinets: cabinets.slice(-maxCabinetSelections),
     }
   }
 }
