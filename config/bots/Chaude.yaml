@@ -43,6 +43,12 @@ plugin_config:
   # Notes: disable injection since compaction handles it with intelligent selection
   notes:
     inject_into_context: false
+    # Daily consolidation: deduplicates and merges notes using a strong model
+    consolidation_enabled: true
+    consolidation_time: "4"                # UTC hour (0-23) to run consolidation
+    consolidation_model: claude-opus-4-6   # Use the beefiest model for quality merging
+    consolidation_cooldown_hours: 24       # Once per day
+    min_notes_to_consolidate: 5            # Only consolidate cabinets with 5+ notes
   # Compaction: auto-summarizes old context + intelligently selects what to inject
   compaction:
     enabled: true
