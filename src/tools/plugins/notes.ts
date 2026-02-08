@@ -7,7 +7,7 @@
  * - Lifecycle hooks for updating injection depth
  */
 
-import { ToolPlugin, PluginContext, PluginStateContext, ContextInjection } from './types.js'
+import { ToolPlugin, PluginContext, PluginStateContext, ContextInjection, ActivationResult } from './types.js'
 import { logger } from '../../utils/logger.js'
 
 interface Note {
@@ -21,6 +21,16 @@ interface Note {
 interface NotesState {
   notes: Note[]
   lastModifiedMessageId: string | null
+  lastConsolidationAt?: string  // ISO date of last consolidation run
+}
+
+interface NotesConfig {
+  inject_into_context?: boolean
+  consolidation_enabled?: boolean
+  consolidation_time?: string              // UTC hour (0-23) when consolidation may run, e.g. "4" or "04"
+  consolidation_model?: string             // Model for consolidation (default: claude-opus-4-6)
+  consolidation_cooldown_hours?: number    // Min hours between runs (default: 24)
+  min_notes_to_consolidate?: number        // Min notes in a cabinet to trigger (default: 5)
 }
 
 const plugin: ToolPlugin = {
@@ -137,7 +147,7 @@ const plugin: ToolPlugin = {
    */
   getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
     // Check if injection is disabled via config (defaults to true)
-    const config = context.pluginConfig as { inject_into_context?: boolean } | undefined
+    const config = context.pluginConfig as NotesConfig | undefined
     if (config?.inject_into_context === false) {
       return []
     }
@@ -322,6 +332,152 @@ const plugin: ToolPlugin = {
     
     return result
   },
+
+  /**
+   * Run note consolidation in background after activation.
+   * Checks configured time window + cooldown, then uses a strong model
+   * to deduplicate and merge notes within each cabinet.
+   */
+  onPostActivation: async (
+    context: PluginStateContext,
+    _result: ActivationResult
+  ): Promise<void> => {
+    const config = context.pluginConfig as NotesConfig | undefined
+    if (!config?.consolidation_enabled) return
+    if (!context.llmComplete) return
+
+    // Check if current UTC hour matches configured consolidation time
+    const targetHour = parseInt(config.consolidation_time || '4', 10)
+    const currentHour = new Date().getUTCHours()
+    if (currentHour !== targetHour) return
+
+    const scope = context.configuredScope
+    const state = await context.getState<NotesState>(scope)
+    if (!state?.notes.length) return
+
+    // Check cooldown
+    const cooldownHours = config.consolidation_cooldown_hours ?? 24
+    if (state.lastConsolidationAt) {
+      const hoursSince = (Date.now() - new Date(state.lastConsolidationAt).getTime()) / (1000 * 60 * 60)
+      if (hoursSince < cooldownHours) return
+    }
+
+    const minNotes = config.min_notes_to_consolidate ?? 5
+    const model = config.consolidation_model || 'claude-opus-4-6'
+
+    // Group notes by cabinet
+    const cabinets = new Map<string, Note[]>()
+    for (const note of state.notes) {
+      const cat = note.category || 'general'
+      if (!cabinets.has(cat)) cabinets.set(cat, [])
+      cabinets.get(cat)!.push(note)
+    }
+
+    let totalRemoved = 0
+    let totalCreated = 0
+    const consolidatedCabinets: string[] = []
+
+    for (const [category, notes] of cabinets) {
+      if (notes.length < minNotes) continue
+
+      const consolidated = await consolidateCabinet(context, category, notes, model)
+      if (!consolidated) continue
+
+      // Remove old notes for this cabinet, add consolidated ones
+      state.notes = state.notes.filter(n => (n.category || 'general') !== category)
+      state.notes.push(...consolidated)
+      totalRemoved += notes.length
+      totalCreated += consolidated.length
+      consolidatedCabinets.push(`${category}: ${notes.length} → ${consolidated.length}`)
+    }
+
+    if (totalRemoved > 0) {
+      state.lastConsolidationAt = new Date().toISOString()
+      state.lastModifiedMessageId = context.currentMessageId
+      await context.setState(scope, state)
+
+      logger.info({
+        channelId: context.channelId,
+        removed: totalRemoved,
+        created: totalCreated,
+        cabinets: consolidatedCabinets,
+      }, 'Notes consolidated')
+    }
+  },
+}
+
+/**
+ * Consolidate a cabinet of notes using an LLM.
+ * Identifies duplicates, merges overlapping notes, preserves all unique information.
+ */
+async function consolidateCabinet(
+  context: PluginStateContext,
+  category: string,
+  notes: Note[],
+  model: string
+): Promise<Note[] | null> {
+  if (!context.llmComplete) return null
+
+  const notesText = notes
+    .map((n, i) => `${i + 1}. [${n.id}] ${n.content}`)
+    .join('\n')
+
+  const prompt = `You are consolidating a cabinet of ${notes.length} notes in the "${category}" category. These notes were saved over time by a Discord bot and likely contain duplicates, overlapping information, and iterative updates where newer notes supersede older ones.
+
+Current notes:
+${notesText}
+
+Your job:
+1. Identify duplicate or heavily overlapping notes
+2. Merge related notes into comprehensive single entries
+3. Preserve ALL unique information — nothing should be lost
+4. Ensure foundational context is explicit in each note (don't assume the reader knows background)
+5. Remove pure duplicates entirely
+6. Keep notes that are already unique and complete as-is
+7. When notes represent iterative updates on the same topic, keep only the most complete/current version
+
+Return a JSON array of consolidated notes. Each note object must have exactly two keys:
+- "content": the full consolidated note text
+- "category": "${category}"
+
+Aim to significantly reduce the note count while preserving all unique information.
+
+Respond with ONLY the JSON array, no other text.`
+
+  try {
+    const response = await context.llmComplete({
+      model,
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    const text = response.text.trim()
+    const jsonStr = text.replace(/^```json?\s*|\s*```$/g, '').trim()
+    const parsed = JSON.parse(jsonStr) as Array<{ content: string; category: string }>
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      logger.warn({ category }, 'Consolidation returned empty result — keeping originals')
+      return null
+    }
+
+    // Sanity check: don't accept if it returned more notes than we started with
+    if (parsed.length >= notes.length) {
+      logger.debug({ category, before: notes.length, after: parsed.length }, 'Consolidation did not reduce notes — skipping')
+      return null
+    }
+
+    const now = Date.now()
+    return parsed.map((entry, i) => ({
+      id: `note_${(now + i).toString(36)}`,
+      content: entry.content,
+      category: entry.category || category,
+      createdAt: new Date().toISOString(),
+      createdByMessageId: context.currentMessageId,
+    }))
+  } catch (error) {
+    logger.error({ error, category, model }, 'Failed to consolidate cabinet')
+    return null
+  }
 }
 
 export default plugin
