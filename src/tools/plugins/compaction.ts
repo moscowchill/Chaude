@@ -223,14 +223,14 @@ const plugin: ToolPlugin = {
     // Always update the conversation preview for selection context
     // This gives the selection LLM actual conversation content to match against
     const contextMessages = result.contextMessages || []
-    if (contextMessages.length > 0) {
-      const scope = context.configuredScope
-      const state = await context.getState<CompactionState>(scope) || {
-        summaries: [],
-        lastCompactionMessageId: null,
-        summarizedMessageIds: [],
-      }
+    const scope = context.configuredScope
+    const state = await context.getState<CompactionState>(scope) || {
+      summaries: [],
+      lastCompactionMessageId: null,
+      summarizedMessageIds: [],
+    }
 
+    if (contextMessages.length > 0) {
       // Store last ~10 messages as preview (truncate each to 200 chars)
       const recentMessages = contextMessages.slice(-10)
       state.recentConversationPreview = recentMessages
@@ -270,9 +270,23 @@ const plugin: ToolPlugin = {
       return
     }
 
+    // Check if there are enough unsummarized messages before entering compaction
+    const unsummarizedCount = contextMessages.filter(
+      m => !state.summarizedMessageIds.includes(m.id)
+    ).length
+    if (unsummarizedCount < config.messages_per_summary) {
+      logger.debug({
+        messageCount: result.messageCount,
+        unsummarized: unsummarizedCount,
+        needed: config.messages_per_summary,
+      }, 'Threshold exceeded but not enough unsummarized messages')
+      return
+    }
+
     logger.info({
       messageCount: result.messageCount,
       messageThreshold: thresholdMessages,
+      unsummarized: unsummarizedCount,
       totalCharacters,
       characterThreshold: config.threshold_characters,
       triggeredBy: characterThresholdExceeded ? 'characters' : 'messages',
