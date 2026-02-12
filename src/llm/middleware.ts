@@ -466,7 +466,10 @@ export class LLMMiddleware {
       if (isBot) {
         // Flush buffer
         if (buffer.length > 0) {
-          messages.push(this.mergeToUserMessage(buffer))
+          const userMsg = this.mergeToUserMessage(buffer)
+          if (this.hasContent(userMsg)) {
+            messages.push(userMsg)
+          }
           buffer = []
         }
         // Add bot message as assistant (skip if empty - API doesn't allow empty assistant messages)
@@ -486,22 +489,24 @@ export class LLMMiddleware {
     // Flush remaining buffer (this is the last user message)
     if (buffer.length > 0) {
       const userMsg = this.mergeToUserMessage(buffer)
-      // Add persona prefill ending if configured (adds "botname:" to prompt completion)
-      if (usePersonaPrefill) {
-        if (typeof userMsg.content === 'string') {
-          userMsg.content = `${userMsg.content}:\n${botName}:`
-        } else if (Array.isArray(userMsg.content)) {
-          // Find last text block and append
-          const lastTextIdx = userMsg.content.map((c: AnthropicContentBlock) => c.type).lastIndexOf('text')
-          if (lastTextIdx >= 0) {
-            const block = userMsg.content[lastTextIdx] as AnthropicContentBlock
-            if (block.text !== undefined) {
-              block.text += `:\n${botName}:`
+      if (this.hasContent(userMsg)) {
+        // Add persona prefill ending if configured (adds "botname:" to prompt completion)
+        if (usePersonaPrefill) {
+          if (typeof userMsg.content === 'string') {
+            userMsg.content = `${userMsg.content}:\n${botName}:`
+          } else if (Array.isArray(userMsg.content)) {
+            // Find last text block and append
+            const lastTextIdx = userMsg.content.map((c: AnthropicContentBlock) => c.type).lastIndexOf('text')
+            if (lastTextIdx >= 0) {
+              const block = userMsg.content[lastTextIdx] as AnthropicContentBlock
+              if (block.text !== undefined) {
+                block.text += `:\n${botName}:`
+              }
             }
           }
         }
+        messages.push(userMsg)
       }
-      messages.push(userMsg)
     }
 
     return {
@@ -528,6 +533,13 @@ export class LLMMiddleware {
       description: tool.description,
       input_schema: tool.inputSchema as Record<string, unknown> || { type: 'object', properties: {} },
     }))
+  }
+
+  /** Check if a provider message has non-empty content (Anthropic rejects empty user messages) */
+  private hasContent(msg: ProviderMessage): boolean {
+    if (typeof msg.content === 'string') return msg.content.trim().length > 0
+    if (Array.isArray(msg.content)) return msg.content.length > 0
+    return false
   }
 
   private mergeToUserMessage(messages: ParticipantMessage[]): ProviderMessage {
