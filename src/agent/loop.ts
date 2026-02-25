@@ -10,7 +10,7 @@ import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { LLMMiddleware, ProviderMessage } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult, LLMRequest, LLMCompletion, ContentBlock } from '../types.js'
+import { Event, BotConfig, CachedDocument, DiscordMessage, ToolCall, ToolResult, LLMRequest, LLMCompletion, ContentBlock } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -54,6 +54,9 @@ export class AgentLoop {
   
   // Membrane integration (optional)
   private membraneProvider?: MembraneProvider
+
+  // Cache for document summaries (keyed by attachment URL)
+  private summaryCache = new Map<string, string>()
 
   constructor(
     private botId: string,
@@ -720,6 +723,80 @@ export class AgentLoop {
     return Boolean((message as Record<string, unknown>)?.system)
   }
 
+  /**
+   * Summarize oversized documents using a fast model (Haiku).
+   * Results are cached by URL to avoid re-summarizing the same file.
+   */
+  private async summarizeOversizedDocuments(documents: CachedDocument[], config: BotConfig): Promise<void> {
+    const SUMMARIZE_THRESHOLD = 30_000  // Only summarize docs exceeding this char count
+    const model = config.summarization_model || 'claude-haiku-4-5-20251001'
+
+    for (const doc of documents) {
+      if (doc.text.length <= SUMMARIZE_THRESHOLD) continue
+
+      // Check cache first
+      const cached = this.summaryCache.get(doc.url)
+      if (cached) {
+        logger.debug({ filename: doc.filename, url: doc.url }, 'Using cached document summary')
+        doc.text = cached
+        doc.summarized = true
+        doc.truncated = false
+        continue
+      }
+
+      try {
+        logger.info({
+          filename: doc.filename,
+          originalChars: doc.text.length,
+          model,
+        }, 'Summarizing oversized document')
+
+        const completion = await this.llmMiddleware.completeRaw({
+          messages: [
+            {
+              role: 'system' as const,
+              content: 'You are a document summarization assistant. Summarize the provided document concisely but thoroughly, preserving key facts, structure, technical details, and important specifics. Do not omit names, numbers, or critical information.',
+            },
+            {
+              role: 'user' as const,
+              content: `Summarize this document (${doc.filename}, ${doc.text.length.toLocaleString()} characters):\n\n${doc.text}`,
+            },
+          ],
+          model,
+          temperature: 0.3,
+          max_tokens: 4096,
+          top_p: 1.0,
+        })
+
+        const summary = completion.content
+          .filter((c: ContentBlock) => c.type === 'text')
+          .map((c: ContentBlock) => c.type === 'text' ? c.text : '')
+          .join('\n')
+
+        if (summary) {
+          const originalChars = doc.text.length
+          const header = `[Summary of ${doc.filename} — original: ${originalChars.toLocaleString()} chars]\n\n`
+          const summaryText = header + summary
+          this.summaryCache.set(doc.url, summaryText)
+          doc.text = summaryText
+          doc.summarized = true
+          doc.truncated = false
+
+          logger.info({
+            filename: doc.filename,
+            originalChars,
+            summaryChars: summary.length,
+            inputTokens: completion.usage?.inputTokens,
+            outputTokens: completion.usage?.outputTokens,
+          }, 'Document summarized successfully')
+        }
+      } catch (error) {
+        logger.warn({ error, filename: doc.filename }, 'Failed to summarize document — using truncated version')
+        // Fall through with original (possibly truncated) text
+      }
+    }
+  }
+
   private async collectPinnedConfigsWithInheritance(channelId: string, baseConfigs: string[]): Promise<string[]> {
     const mergedConfigs: string[] = []
     const parentChain = await this.buildParentChannelChain(channelId)
@@ -1375,6 +1452,13 @@ export class AgentLoop {
         this.toolSystem.setPluginContextFactory(pluginContextFactory, config.plugin_config)
       }
       endProfile('pluginInjections')
+
+      // 4.5. Summarize oversized documents via fast model (cached by URL)
+      if (discordContext.documents.length > 0) {
+        startProfile('documentSummarization')
+        await this.summarizeOversizedDocuments(discordContext.documents, config)
+        endProfile('documentSummarization')
+      }
 
       // 5. Build LLM context
       startProfile('contextBuild')
