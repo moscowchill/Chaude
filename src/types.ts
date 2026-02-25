@@ -179,6 +179,7 @@ export interface BotConfig {
   include_text_attachments: boolean
   max_text_attachment_kb: number  // Max size per text attachment in KB
   max_message_chars: number       // Max chars per message (0 = unlimited, truncates with notice)
+  summarization_model?: string    // Model for summarizing oversized attachments (default: claude-haiku-4-5-20251001)
 
   // Tool config
   tools_enabled: boolean
@@ -423,6 +424,7 @@ export interface CachedDocument {
   size: number
   text: string
   truncated?: boolean
+  summarized?: boolean
 }
 
 // ============================================================================

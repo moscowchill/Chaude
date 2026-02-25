@@ -25,9 +25,9 @@ export interface ConnectorOptions {
   maxBackoffMs: number
 }
 
-const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
-const MAX_PDF_DOWNLOAD_BYTES = 10 * 1024 * 1024  // 10 MB max PDF download
-const MAX_PDF_OUTPUT_CHARS = 30_000  // 30K chars max from PDF (context safety)
+const MAX_TEXT_ATTACHMENT_BYTES = 500_000  // ~500 KB raw text (summarizer handles oversized docs)
+const MAX_PDF_DOWNLOAD_BYTES = 25 * 1024 * 1024  // 25 MB max PDF download (summarizer handles large docs)
+const MAX_PDF_OUTPUT_CHARS = 100_000  // 100K chars from PDF (summarizer compresses if needed)
 const MAX_PDF_PAGES_FULL = 10  // PDFs over this get a "too long" warning
 
 // Dynamic import for pdf-parse (optional dependency)

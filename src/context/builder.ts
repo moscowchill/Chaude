@@ -1003,23 +1003,25 @@ export class ContextBuilder {
         const msgDocuments = documentsByMessageId.get(msg.id) || []
         
         for (const doc of msgDocuments) {
-          if (doc.size <= maxSizeBytes) {
+          // Summarized docs bypass size check (summary is already compact)
+          if (doc.summarized || doc.size <= maxSizeBytes) {
             // Wrap in XML block with filename
-            const truncatedNote = doc.truncated ? ' [truncated]' : ''
-            const xmlContent = `<attachment filename="${doc.filename}"${truncatedNote}>\n${doc.text}\n</attachment>`
+            const statusNote = doc.summarized ? ' [summarized]' : doc.truncated ? ' [truncated]' : ''
+            const xmlContent = `<attachment filename="${doc.filename}"${statusNote}>\n${doc.text}\n</attachment>`
             content.push({
               type: 'text',
               text: xmlContent,
             })
-            logger.debug({ 
-              messageId: msg.id, 
+            logger.debug({
+              messageId: msg.id,
               filename: doc.filename,
               sizeKB: (doc.size / 1024).toFixed(2),
+              summarized: doc.summarized,
               truncated: doc.truncated
             }, 'Added text document to content')
           } else {
-            logger.debug({ 
-              messageId: msg.id, 
+            logger.debug({
+              messageId: msg.id,
               filename: doc.filename,
               sizeKB: (doc.size / 1024).toFixed(2),
               maxKB: config.max_text_attachment_kb || 200
