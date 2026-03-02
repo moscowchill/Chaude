@@ -914,6 +914,12 @@ export class AgentLoop {
         continue
       }
 
+      // Skip messages from other bots, apps, and webhooks - only respond to real users
+      if (author?.bot || (message as Record<string, unknown>).webhook_id) {
+        logger.debug({ messageId: message.id, author: author?.username, isBot: author?.bot, hasWebhookId: !!(message as Record<string, unknown>).webhook_id }, 'Skipping bot/webhook message')
+        continue
+      }
+
       // 1. Check for m command FIRST (before mention check)
       // This ensures "m continue <@bot>" gets flagged for deletion
       // Only trigger/delete if addressed to THIS bot (mention or reply)
@@ -976,13 +982,8 @@ export class AgentLoop {
         return true
       }
 
-      // 3. Check for reply to bot's message (but ignore replies from other bots without mention)
+      // 3. Check for reply to bot's message
       if (reference?.messageId && this.botMessageIds.has(reference.messageId as string)) {
-        // If the replying user is a bot, only activate if they explicitly mentioned us
-        if (author?.bot) {
-          logger.debug({ messageId: message.id, author: author?.username }, 'Ignoring bot reply without mention')
-          continue
-        }
         logger.debug({ messageId: message.id }, 'Activated by reply')
         return true
       }
