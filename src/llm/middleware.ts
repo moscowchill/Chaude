@@ -437,21 +437,48 @@ export class LLMMiddleware {
     const usePersonaPrompt = request.config.chatPersonaPrompt
     const usePersonaPrefill = request.config.chatPersonaPrefill
     const botAsAssistant = request.config.chatBotAsAssistant !== false  // Default true
+    // Prompt caching (default: true) - mirror prefill mode's cache_control handling
+    const promptCachingEnabled = request.config.prompt_caching !== false
 
-    // Add system prompt
+    // Add system prompt. With caching enabled, emit as a content block with cache_control
+    // on the LAST system block - this also caches tool definitions, which the API renders
+    // before system. Without caching, keep the plain-string form for OpenAI-compatible servers.
     if (request.system_prompt) {
-      messages.push({
-        role: 'system',
-        content: request.system_prompt,
-      })
+      if (promptCachingEnabled && !usePersonaPrompt) {
+        messages.push({
+          role: 'system',
+          content: [{
+            type: 'text',
+            text: request.system_prompt,
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          }],
+        })
+      } else {
+        messages.push({
+          role: 'system',
+          content: request.system_prompt,
+        })
+      }
     }
-    
+
     // Add persona instruction if configured
     if (usePersonaPrompt) {
-      messages.push({
-        role: 'system',
-        content: `Respond to the chat, where your username is shown as ${botName}. Only respond with the content of your message, without including your username.`,
-      })
+      const personaText = `Respond to the chat, where your username is shown as ${botName}. Only respond with the content of your message, without including your username.`
+      if (promptCachingEnabled) {
+        messages.push({
+          role: 'system',
+          content: [{
+            type: 'text',
+            text: personaText,
+            cache_control: { type: 'ephemeral', ttl: '1h' },
+          }],
+        })
+      } else {
+        messages.push({
+          role: 'system',
+          content: personaText,
+        })
+      }
     }
 
     // Group consecutive non-bot messages
@@ -459,14 +486,14 @@ export class LLMMiddleware {
 
     for (const msg of request.messages) {
       // Match by Discord username if available, otherwise fall back to inner name
-      const isBot = botAsAssistant && (botDiscordUsername 
-        ? msg.participant === botDiscordUsername 
+      const isBot = botAsAssistant && (botDiscordUsername
+        ? msg.participant === botDiscordUsername
         : msg.participant === botName)
 
       if (isBot) {
         // Flush buffer
         if (buffer.length > 0) {
-          const userMsg = this.mergeToUserMessage(buffer)
+          const userMsg = this.mergeToUserMessage(buffer, promptCachingEnabled)
           if (this.hasContent(userMsg)) {
             messages.push(userMsg)
           }
@@ -475,10 +502,19 @@ export class LLMMiddleware {
         // Add bot message as assistant (skip if empty - API doesn't allow empty assistant messages)
         const text = this.extractText(msg.content)
         if (text.trim()) {
-        messages.push({
-          role: 'assistant',
-          content: text,
-        })
+          // If this message carries the cache marker, everything up to and including it is
+          // the stable prefix - emit as a content block with cache_control
+          if (promptCachingEnabled && msg.cacheControl) {
+            messages.push({
+              role: 'assistant',
+              content: [{ type: 'text', text, cache_control: { type: 'ephemeral', ttl: '1h' } }],
+            })
+          } else {
+            messages.push({
+              role: 'assistant',
+              content: text,
+            })
+          }
         }
       } else {
         // Add to buffer (including bot messages if botAsAssistant is false)
@@ -488,7 +524,7 @@ export class LLMMiddleware {
 
     // Flush remaining buffer (this is the last user message)
     if (buffer.length > 0) {
-      const userMsg = this.mergeToUserMessage(buffer)
+      const userMsg = this.mergeToUserMessage(buffer, promptCachingEnabled)
       if (this.hasContent(userMsg)) {
         // Add persona prefill ending if configured (adds "botname:" to prompt completion)
         if (usePersonaPrefill) {
@@ -499,9 +535,14 @@ export class LLMMiddleware {
             const lastTextIdx = userMsg.content.map((c: AnthropicContentBlock) => c.type).lastIndexOf('text')
             if (lastTextIdx >= 0) {
               const block = userMsg.content[lastTextIdx] as AnthropicContentBlock
-              if (block.text !== undefined) {
+              if (block.cache_control) {
+                // Don't mutate a cached block (would invalidate the prefix every turn)
+                userMsg.content.push({ type: 'text', text: `:\n${botName}:` })
+              } else if (block.text !== undefined) {
                 block.text += `:\n${botName}:`
               }
+            } else {
+              userMsg.content.push({ type: 'text', text: `:\n${botName}:` })
             }
           }
         }
@@ -542,14 +583,24 @@ export class LLMMiddleware {
     return false
   }
 
-  private mergeToUserMessage(messages: ParticipantMessage[]): ProviderMessage {
-    const parts: string[] = []
+  private mergeToUserMessage(messages: ParticipantMessage[], promptCachingEnabled = false): ProviderMessage {
+    // Text parts up to and including the cache-marked message form the stable
+    // cached prefix; parts after it (and all images) stay uncached so image
+    // rotation and new messages don't invalidate the prefix.
+    const cachedParts: string[] = []
+    const uncachedParts: string[] = []
     const images: ImageContent[] = []
+    let passedMarker = false
+    const hasMarker = promptCachingEnabled && messages.some(m => !!m.cacheControl)
 
     for (const msg of messages) {
       const text = this.extractText(msg.content)
       if (text) {
-        parts.push(`${msg.participant}: ${text}`)
+        const target = hasMarker && !passedMarker ? cachedParts : uncachedParts
+        target.push(`${msg.participant}: ${text}`)
+      }
+      if (hasMarker && msg.cacheControl) {
+        passedMarker = true
       }
       // Collect images
       for (const block of msg.content) {
@@ -559,12 +610,23 @@ export class LLMMiddleware {
       }
     }
 
-    // If there are images, return content as array of blocks
-    if (images.length > 0) {
+    // If there's a cache marker or images, return content as array of blocks
+    if ((hasMarker && cachedParts.length > 0) || images.length > 0) {
       const content: AnthropicContentBlock[] = []
-      // Add text first
-      if (parts.length > 0) {
-        content.push({ type: 'text', text: parts.join('\n') })
+      if (hasMarker && cachedParts.length > 0) {
+        content.push({
+          type: 'text',
+          text: cachedParts.join('\n'),
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        })
+        if (uncachedParts.length > 0) {
+          content.push({ type: 'text', text: uncachedParts.join('\n') })
+        }
+      } else {
+        const allParts = [...cachedParts, ...uncachedParts]
+        if (allParts.length > 0) {
+          content.push({ type: 'text', text: allParts.join('\n') })
+        }
       }
       // Add images, stripping tokenEstimate (Anthropic API doesn't allow extra fields)
       for (const img of images) {
@@ -577,10 +639,10 @@ export class LLMMiddleware {
       }
     }
 
-    // No images - return simple string content
+    // No marker or images - return simple string content
     return {
       role: 'user',
-      content: parts.join('\n'),
+      content: [...cachedParts, ...uncachedParts].join('\n'),
     }
   }
 
