@@ -429,7 +429,17 @@ export class LLMMiddleware {
     }
   }
 
-  private transformToChat(request: LLMRequest, _provider: LLMProvider): ProviderRequest {
+  /**
+   * Build chat-mode provider messages (system + conversation) for a request.
+   * Used by the agent loop to construct native tool continuations that share the exact
+   * same (cached) prefix as the initial call - rebuilding the conversation by hand there
+   * would drop cache_control blocks and produce a different byte prefix.
+   */
+  buildChatMessages(request: LLMRequest): ProviderMessage[] {
+    return this.transformToChat(request).messages
+  }
+
+  private transformToChat(request: LLMRequest, _provider?: LLMProvider): ProviderRequest {
     const messages: ProviderMessage[] = []
     const botName = request.config.botName
     // Use Discord username for message matching (identifies bot's own messages accurately)

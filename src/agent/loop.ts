@@ -2108,6 +2108,9 @@ export class AgentLoop {
     let accumulatedOutput = ''
     let toolDepth = 0
     const allToolCallIds: string[] = []
+    // Exact (name, input) signatures of tools already executed this activation,
+    // used to detect the model looping on identical calls
+    const executedToolSignatures = new Set<string>()
     const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
@@ -2148,6 +2151,14 @@ export class AgentLoop {
       // Get completion (routes to membrane if config.use_membrane is true)
       let completion = await this.completeLLM(continuationRequest, config)
 
+      // Cumulative conversation for native tool rounds. Built lazily from the SAME
+      // transform as the initial call (shared cached prefix), then each round's
+      // tool_use/tool_result exchange is APPENDED - never rebuilt. Rebuilding from
+      // scratch every round (the old behavior) dropped all prior tool exchanges,
+      // so the model couldn't see what it had already called and called it again
+      // (observed in prod: 101 identical web_search calls in one activation).
+      let toolConversation: ProviderMessage[] | null = null
+
       // Handle native tool_use in chat mode
       // IMPORTANT: Capture text content before entering the loop - the model may return
       // text alongside tool_use blocks, and we need to accumulate it before processing tools
@@ -2165,6 +2176,15 @@ export class AgentLoop {
         const toolUseBlocks = completion.content.filter((c: ContentBlock): c is ContentBlock & { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => c.type === 'tool_use')
 
         if (toolUseBlocks.length === 0) break
+
+        // Fail fast on exact repeats: results are now visible in the conversation,
+        // so an identical (name, input) call can only yield the same answer.
+        // A round consisting solely of already-executed calls means the model is looping.
+        const signatures = toolUseBlocks.map(b => `${b.name}:${JSON.stringify(b.input)}`)
+        if (signatures.every(s => executedToolSignatures.has(s))) {
+          logger.warn({ signatures, toolDepth }, 'Model repeated identical tool calls - stopping tool loop')
+          break
+        }
 
         logger.info({ toolCount: toolUseBlocks.length, toolDepth }, 'Processing native tool_use blocks')
 
@@ -2185,6 +2205,7 @@ export class AgentLoop {
 
           const result = await this.toolSystem.executeTool(toolCall)
           allToolCallIds.push(toolCall.id)
+          executedToolSignatures.add(`${toolCall.name}:${JSON.stringify(toolCall.input)}`)
 
           // Persist tool call
           await this.toolSystem.persistToolUse(this.botId, channelId, toolCall, result)
@@ -2199,60 +2220,28 @@ export class AgentLoop {
           toolDepth++
         }
 
-        // Build continuation using original completion's context
-        // We need to make a new LLM call with the tool results appended
-        // Use the middleware's transform by creating a proper LLMRequest with tool history
-
-        // For now, make a direct API call with properly formatted messages
-        // Get system prompt from the original request
-        const systemPrompt = continuationRequest.system_prompt || config.system_prompt || ''
-
-        // Transform participant messages to API format
-        const apiMessages: ProviderMessage[] = []
-        if (systemPrompt) {
-          apiMessages.push({ role: 'system', content: systemPrompt })
+        // Build the base conversation ONCE via the middleware's chat transform - the same
+        // transform the initial call went through, so the byte prefix (incl. cache_control
+        // blocks) matches and continuations get prompt-cache reads instead of full price.
+        if (!toolConversation) {
+          toolConversation = this.llmMiddleware.buildChatMessages(continuationRequest)
         }
 
-        // Convert conversation messages (skip system)
-        const srcMessages = continuationRequest.messages || []
-        let buffer: Array<{ participant: string; text: string }> = []
-        const botName = config.name
-
-        for (const msg of srcMessages) {
-          const isBot = msg.participant === botName
-          const text = Array.isArray(msg.content)
-            ? msg.content.filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text').map((c) => c.text).join('\n')
-            : (typeof msg.content === 'string' ? msg.content : '')
-
-          if (isBot) {
-            if (buffer.length > 0) {
-              apiMessages.push({ role: 'user', content: buffer.map(m => `${m.participant}: ${m.text}`).join('\n') })
-              buffer = []
-            }
-            if (text.trim()) {
-              apiMessages.push({ role: 'assistant', content: text })
-            }
-          } else {
-            buffer.push({ participant: msg.participant, text })
-          }
-        }
-        if (buffer.length > 0) {
-          apiMessages.push({ role: 'user', content: buffer.map(m => `${m.participant}: ${m.text}`).join('\n') })
-        }
-
-        // Add the assistant's tool_use response and user's tool_result
+        // Append this round's assistant tool_use response and user tool_result
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ContentBlock[] and tool_result content need to be passed to provider
-        apiMessages.push({ role: 'assistant', content: completion.content as any })
+        toolConversation.push({ role: 'assistant', content: completion.content as any })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool results need to be passed to provider
-        apiMessages.push({ role: 'user', content: toolResults as any })
+        toolConversation.push({ role: 'user', content: toolResults as any })
 
-        // Build continuation request with tool results (direct provider format)
+        // Build continuation request with tool results (direct provider format).
+        // Reuse the originating request's model/params - switching models mid-turn
+        // (the old hardcoded Haiku fallback) busts the cache and changes voice.
         const toolContinuationRequest = {
-          messages: apiMessages,
-          model: config.continuation_model || 'claude-haiku-4-5-20251001',
-          temperature: config.temperature ?? 1.0,
-          max_tokens: config.max_tokens ?? 8192,
-          top_p: config.top_p ?? 1.0,
+          messages: toolConversation,
+          model: continuationRequest.config.model,
+          temperature: continuationRequest.config.temperature,
+          max_tokens: continuationRequest.config.max_tokens,
+          top_p: continuationRequest.config.top_p,
           tools: this.toolSystem.getAvailableTools().map(t => ({
             name: t.name,
             description: t.description,
