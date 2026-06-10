@@ -48,6 +48,11 @@ export class AgentLoop {
   private botMessageIds = new Set<string>()  // Track bot's own message IDs
   private mcpInitialized = false
   private activeChannels = new Set<string>()  // Track channels currently being processed
+  // Events that arrived for a channel while it was being processed. Replayed into the
+  // queue when the in-flight activation finishes, so mentions/replies/m-commands sent
+  // during processing are deferred instead of silently dropped.
+  private pendingChannelEvents = new Map<string, Event[]>()
+  private static readonly MAX_PENDING_EVENTS_PER_CHANNEL = 50
   private activationStore: ActivationStore
   private cacheDir: string
   private somaClient?: SomaClient  // Optional Soma credit system client
@@ -104,7 +109,22 @@ export class AgentLoop {
 
         if (batch.length > 0) {
           logger.debug({ batchSize: batch.length, queueSize: this.queue.size() }, 'Polled batch from queue')
-          await this.processBatch(batch)
+          // Partition by channel: processBatch treats a batch as a single-channel unit
+          // (channelId from the first event, activation scanned across all events).
+          // A mixed batch could activate in channel A from a mention in channel B,
+          // consuming B's mention without ever replying there.
+          const byChannel = new Map<string, Event[]>()
+          for (const event of batch) {
+            const group = byChannel.get(event.channelId)
+            if (group) {
+              group.push(event)
+            } else {
+              byChannel.set(event.channelId, [event])
+            }
+          }
+          for (const group of byChannel.values()) {
+            await this.processBatch(group)
+          }
         } else {
           // Avoid busy-waiting
           await sleep(100)
@@ -361,6 +381,24 @@ export class AgentLoop {
       }
     }
 
+    // If this channel is already being processed, defer the events instead of
+    // dropping them: they're replayed into the queue when the in-flight activation
+    // finishes. Checked BEFORE shouldActivate (no wasted I/O / double reactions) and
+    // BEFORE m-command deletion (previously an "m continue" sent mid-activation was
+    // deleted from Discord and then silently discarded).
+    if (this.activeChannels.has(firstEvent.channelId)) {
+      const pending = this.pendingChannelEvents.get(firstEvent.channelId) || []
+      pending.push(...events)
+      if (pending.length > AgentLoop.MAX_PENDING_EVENTS_PER_CHANNEL) {
+        const dropped = pending.length - AgentLoop.MAX_PENDING_EVENTS_PER_CHANNEL
+        pending.splice(0, dropped)
+        logger.warn({ channelId: firstEvent.channelId, dropped }, 'Pending event buffer full - dropped oldest events')
+      }
+      this.pendingChannelEvents.set(firstEvent.channelId, pending)
+      logger.debug({ channelId: firstEvent.channelId, pendingCount: pending.length }, 'Channel busy - deferring events for replay')
+      return
+    }
+
     // Check if activation is needed
     if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
       logger.debug('No activation needed')
@@ -397,12 +435,6 @@ export class AgentLoop {
       }
     }
 
-    // Check if this channel is already being processed
-    if (this.activeChannels.has(channelId)) {
-      logger.debug({ channelId }, 'Channel already being processed, skipping')
-      return
-    }
-
     // Mark channel as active and process asynchronously (don't await)
     this.activeChannels.add(channelId)
     
@@ -422,7 +454,7 @@ export class AgentLoop {
     
     if (somaCheckResult.status === 'blocked') {
       // User doesn't have enough ichor - message already sent
-      this.activeChannels.delete(channelId)
+      this.releaseChannel(channelId)
       return
     }
     
@@ -500,8 +532,26 @@ export class AgentLoop {
         logger.error({ error, channelId, guildId }, 'Failed to handle activation')
       })
       .finally(() => {
-        this.activeChannels.delete(channelId)
+        this.releaseChannel(channelId)
       })
+  }
+
+  /**
+   * Mark a channel as no longer being processed and replay any events that
+   * arrived (and were deferred) while it was busy.
+   */
+  private releaseChannel(channelId: string): void {
+    this.activeChannels.delete(channelId)
+    const pending = this.pendingChannelEvents.get(channelId)
+    if (pending && pending.length > 0) {
+      this.pendingChannelEvents.delete(channelId)
+      logger.info({ channelId, count: pending.length }, 'Replaying events deferred while channel was busy')
+      for (const event of pending) {
+        this.queue.push(event)
+      }
+    } else {
+      this.pendingChannelEvents.delete(channelId)
+    }
   }
   
   private determineActivationReason(events: Event[]): { 
