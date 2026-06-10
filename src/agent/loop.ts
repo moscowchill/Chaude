@@ -537,6 +537,26 @@ export class AgentLoop {
   }
 
   /**
+   * Stable signature for a tool call: object keys are sorted recursively so the
+   * same semantic input produces the same signature regardless of the key order
+   * the model happened to emit.
+   */
+  private toolCallSignature(name: string, input: Record<string, unknown> | undefined): string {
+    const canonicalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonicalize)
+      if (value && typeof value === 'object') {
+        const sorted: Record<string, unknown> = {}
+        for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+          sorted[key] = canonicalize((value as Record<string, unknown>)[key])
+        }
+        return sorted
+      }
+      return value
+    }
+    return `${name}:${JSON.stringify(canonicalize(input ?? {}))}`
+  }
+
+  /**
    * Mark a channel as no longer being processed and replay any events that
    * arrived (and were deferred) while it was busy.
    */
@@ -964,9 +984,12 @@ export class AgentLoop {
         continue
       }
 
-      // Skip messages from other bots, apps, and webhooks - only respond to real users
-      if (author?.bot || (message as Record<string, unknown>).webhook_id) {
-        logger.debug({ messageId: message.id, author: author?.username, isBot: author?.bot, hasWebhookId: !!(message as Record<string, unknown>).webhook_id }, 'Skipping bot/webhook message')
+      // Skip messages from other bots, apps, and webhooks - only respond to real users.
+      // event.data is a discord.js Message, whose property is webhookId (camelCase);
+      // webhook_id kept as a fallback for raw-payload shapes.
+      const hasWebhookId = !!((message as Record<string, unknown>).webhookId || (message as Record<string, unknown>).webhook_id)
+      if (author?.bot || hasWebhookId) {
+        logger.debug({ messageId: message.id, author: author?.username, isBot: author?.bot, hasWebhookId }, 'Skipping bot/webhook message')
         continue
       }
 
@@ -2230,7 +2253,7 @@ export class AgentLoop {
         // Fail fast on exact repeats: results are now visible in the conversation,
         // so an identical (name, input) call can only yield the same answer.
         // A round consisting solely of already-executed calls means the model is looping.
-        const signatures = toolUseBlocks.map(b => `${b.name}:${JSON.stringify(b.input)}`)
+        const signatures = toolUseBlocks.map(b => this.toolCallSignature(b.name, b.input))
         if (signatures.every(s => executedToolSignatures.has(s))) {
           logger.warn({ signatures, toolDepth }, 'Model repeated identical tool calls - stopping tool loop')
           break
@@ -2255,7 +2278,7 @@ export class AgentLoop {
 
           const result = await this.toolSystem.executeTool(toolCall)
           allToolCallIds.push(toolCall.id)
-          executedToolSignatures.add(`${toolCall.name}:${JSON.stringify(toolCall.input)}`)
+          executedToolSignatures.add(this.toolCallSignature(toolCall.name, toolCall.input))
 
           // Persist tool call
           await this.toolSystem.persistToolUse(this.botId, channelId, toolCall, result)

@@ -696,7 +696,10 @@ export class ContextBuilder {
     isHardLimit: boolean
   ): { messages: ParticipantMessage[], didTruncate: boolean } {
     let keptChars = 0
-    let cutoffIndex = messages.length
+    // 0 = keep everything; only the break below moves it. Initializing to
+    // messages.length would mean "truncate everything" if the loop ever
+    // completed without exceeding the limit.
+    let cutoffIndex = 0
     
     // Count from end backwards
     for (let i = messages.length - 1; i >= 0; i--) {
