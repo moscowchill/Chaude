@@ -22,12 +22,19 @@ interface NotesState {
   notes: Note[]
   lastModifiedMessageId: string | null
   lastConsolidationAt?: string  // ISO date of last consolidation run
+  /** One-deep backup of the notes array as it was before the last consolidation.
+   *  Consolidation is an irreversible LLM rewrite of the bot's long-term memory -
+   *  this gives one level of manual recovery if a merge loses information. */
+  preConsolidationBackup?: { notes: Note[]; replacedAt: string }
 }
 
 interface NotesConfig {
   inject_into_context?: boolean
   consolidation_enabled?: boolean
-  consolidation_time?: string              // UTC hour (0-23) when consolidation may run, e.g. "4" or "04"
+  /** @deprecated No longer used. Consolidation runs opportunistically whenever the
+   *  cooldown has elapsed - the exact-hour gate meant a bot with a few activations
+   *  per day would essentially never consolidate. */
+  consolidation_time?: string
   consolidation_model?: string             // Model for consolidation (default: claude-opus-4-6)
   consolidation_cooldown_hours?: number    // Min hours between runs (default: 24)
   min_notes_to_consolidate?: number        // Min notes in a cabinet to trigger (default: 5)
@@ -149,6 +156,19 @@ const plugin: ToolPlugin = {
     // Check if injection is disabled via config (defaults to true)
     const config = context.pluginConfig as NotesConfig | undefined
     if (config?.inject_into_context === false) {
+      return []
+    }
+
+    // Guard against double injection: when the compaction plugin is active it
+    // injects notes itself (as selected cabinets), so notes' own injection
+    // defaults OFF unless explicitly enabled with inject_into_context: true.
+    const botConfig = context.config as {
+      tool_plugins?: string[]
+      plugin_config?: Record<string, { enabled?: boolean } | undefined>
+    } | undefined
+    const compactionActive = !!botConfig?.tool_plugins?.includes('compaction')
+      && botConfig?.plugin_config?.compaction?.enabled !== false
+    if (compactionActive && config?.inject_into_context !== true) {
       return []
     }
     
@@ -346,10 +366,10 @@ const plugin: ToolPlugin = {
     if (!config?.consolidation_enabled) return
     if (!context.llmComplete) return
 
-    // Check if current UTC hour matches configured consolidation time
-    const targetHour = parseInt(config.consolidation_time || '4', 10)
-    const currentHour = new Date().getUTCHours()
-    if (currentHour !== targetHour) return
+    // Opportunistic trigger: run whenever the cooldown has elapsed and a cabinet
+    // qualifies. The old exact-UTC-hour gate (consolidation_time) required the bot
+    // to activate during one specific hour - with a few activations per day,
+    // consolidation never ran in practice. The cooldown already rate-limits runs.
 
     const scope = context.configuredScope
     const state = await context.getState<NotesState>(scope)
@@ -376,6 +396,9 @@ const plugin: ToolPlugin = {
     let totalRemoved = 0
     let totalCreated = 0
     const consolidatedCabinets: string[] = []
+    // Snapshot BEFORE any mutation - consolidation irreversibly replaces notes
+    // with an LLM rewrite, so keep one level of recovery in state
+    const originalNotes = [...state.notes]
 
     for (const [category, notes] of cabinets) {
       if (notes.length < minNotes) continue
@@ -392,6 +415,7 @@ const plugin: ToolPlugin = {
     }
 
     if (totalRemoved > 0) {
+      state.preConsolidationBackup = { notes: originalNotes, replacedAt: new Date().toISOString() }
       state.lastConsolidationAt = new Date().toISOString()
       state.lastModifiedMessageId = context.currentMessageId
       await context.setState(scope, state)
@@ -480,12 +504,19 @@ Respond with ONLY the JSON array, no other text.`
     const now = new Date()
     const nowMs = now.getTime()
     const nowISO = now.toISOString()
+    // Stamp consolidated notes with the newest SOURCE note's message ID, not the
+    // current message - otherwise every consolidation makes the whole cabinet look
+    // brand-new to injection-depth aging
+    const latestSourceMessageId = notes.reduce(
+      (latest, n) => (n.createdByMessageId > latest ? n.createdByMessageId : latest),
+      notes[0]?.createdByMessageId || context.currentMessageId
+    )
     return validEntries.map((entry, i) => ({
       id: `note_${(nowMs + i).toString(36)}`,
       content: entry.content,
       category: entry.category || category,
       createdAt: nowISO,
-      createdByMessageId: context.currentMessageId,
+      createdByMessageId: latestSourceMessageId,
     }))
   } catch (error) {
     logger.error({ error, category, model }, 'Failed to consolidate cabinet')

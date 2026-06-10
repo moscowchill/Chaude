@@ -133,7 +133,9 @@ export class ToolSystem {
             logger.debug({ pluginName }, 'Post-activation hook completed')
           })
           .catch((error) => {
-            logger.error({ error, pluginName }, 'Post-activation hook failed')
+            // Use the 'err' key - pino only serializes Error objects (message/stack)
+            // under 'err'; under 'error' they serialize to {} and the failure is blind
+            logger.error({ err: error, pluginName }, 'Post-activation hook failed')
           })
       }
     }
