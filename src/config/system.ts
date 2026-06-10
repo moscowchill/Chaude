@@ -286,7 +286,10 @@ export class ConfigSystem {
       // Tool config
       tools_enabled: config.tools_enabled ?? true,
       tool_output_visible: config.tool_output_visible ?? false,
-      max_tool_depth: config.max_tool_depth || 100,
+      // Max tool-call iterations per activation. Keep this small: a looping model
+      // burns one full-context LLM call per iteration (observed in prod: the old
+      // default of 100 let a single activation make 101 calls / 376k tokens)
+      max_tool_depth: config.max_tool_depth || 10,
       max_mcp_images: config.max_mcp_images ?? 3,  // Default: keep up to 3 latest MCP images
       mcp_servers: config.mcp_servers,
       tool_plugins: config.tool_plugins || [],

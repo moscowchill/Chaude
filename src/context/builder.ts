@@ -611,18 +611,22 @@ export class ContextBuilder {
     
     const hardMaxCharacters = config.hard_max_characters || 500000
     const normalLimit = config.recency_window_characters || 100000  // Default normal limit
-    
+    // Truncate BELOW the limit so the kept context has headroom to grow before the next
+    // truncation. Truncating to exactly the limit means the very next message pushes us
+    // over again, moving the window start (and busting the prompt cache) on EVERY activation.
+    const truncateTarget = Math.floor(normalLimit * 0.7)
+
     // ALWAYS enforce hard maximum (even when not rolling)
-    // When exceeded, truncate to NORMAL limit (not hard max) to reset cache properly
+    // When exceeded, truncate to below the NORMAL limit (not hard max) to reset cache properly
     if (totalChars > hardMaxCharacters) {
       logger.warn({
         totalChars,
         hardMax: hardMaxCharacters,
-        normalLimit,
+        truncateTarget,
         messageCount: messages.length
-      }, 'HARD LIMIT EXCEEDED - Truncating to normal limit and forcing roll')
-      
-      const result = this.truncateToLimit(messages, normalLimit, true)
+      }, 'HARD LIMIT EXCEEDED - Truncating below normal limit and forcing roll')
+
+      const result = this.truncateToLimit(messages, truncateTarget, true)
       return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
@@ -643,9 +647,10 @@ export class ContextBuilder {
       logger.info({
         totalChars,
         limit: normalLimit,
+        truncateTarget,
         messageCount: messages.length
       }, 'First activation but over limit - truncating to avoid rate limits')
-      const result = this.truncateToLimit(messages, normalLimit, true)
+      const result = this.truncateToLimit(messages, truncateTarget, false)
       return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
@@ -657,9 +662,10 @@ export class ContextBuilder {
       logger.info({
         totalChars,
         limit: normalLimit,
+        truncateTarget,
         messageCount: messages.length
       }, 'Rolling: Character limit exceeded, truncating final context')
-      const result = this.truncateToLimit(messages, normalLimit, true)
+      const result = this.truncateToLimit(messages, truncateTarget, false)
       return { ...result, messagesRemoved: messages.length - result.messages.length }
     }
     
@@ -690,7 +696,10 @@ export class ContextBuilder {
     isHardLimit: boolean
   ): { messages: ParticipantMessage[], didTruncate: boolean } {
     let keptChars = 0
-    let cutoffIndex = messages.length
+    // 0 = keep everything; only the break below moves it. Initializing to
+    // messages.length would mean "truncate everything" if the loop ever
+    // completed without exceeding the limit.
+    let cutoffIndex = 0
     
     // Count from end backwards
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -715,10 +724,16 @@ export class ContextBuilder {
         cutoffIndex = i + 1
         break
       }
-      
+
       keptChars += msgSize
     }
-    
+
+    // Never return an empty context: if the newest message alone exceeds the limit,
+    // keep it anyway (better an oversized request than an empty one)
+    if (cutoffIndex >= messages.length && messages.length > 0) {
+      cutoffIndex = messages.length - 1
+    }
+
     const truncated = messages.slice(cutoffIndex)
     
     if (cutoffIndex > 0) {

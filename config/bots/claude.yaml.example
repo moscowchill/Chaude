@@ -31,7 +31,7 @@ max_images: 5
 # Tool configuration
 tools_enabled: true
 tool_output_visible: false  # Show tool calls in Discord
-max_tool_depth: 100  # Max tool call iterations
+max_tool_depth: 10  # Max tool call iterations per activation (each iteration = one full LLM call)
 
 # Tool plugins (built-in tools)
 # tool_plugins: ['config']  # Enable config plugin for list_config and request_config_change tools

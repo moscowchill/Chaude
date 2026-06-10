@@ -527,8 +527,11 @@ async function runCompaction(
     return
   }
 
-  // Take the oldest N messages to summarize (they're ordered newest-first)
-  const messagesToSummarize = unsummarizedMessages.slice(-config.messages_per_summary)
+  // Take the oldest N messages to summarize - context is ordered oldest-first
+  // (the connector prepends older batches). slice(-N) here grabbed the NEWEST
+  // messages, summarizing the live conversation while the content about to roll
+  // off the window was never preserved.
+  const messagesToSummarize = unsummarizedMessages.slice(0, config.messages_per_summary)
 
   logger.info({
     messageCount: messagesToSummarize.length,

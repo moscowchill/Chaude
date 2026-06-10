@@ -48,6 +48,11 @@ export class AgentLoop {
   private botMessageIds = new Set<string>()  // Track bot's own message IDs
   private mcpInitialized = false
   private activeChannels = new Set<string>()  // Track channels currently being processed
+  // Events that arrived for a channel while it was being processed. Replayed into the
+  // queue when the in-flight activation finishes, so mentions/replies/m-commands sent
+  // during processing are deferred instead of silently dropped.
+  private pendingChannelEvents = new Map<string, Event[]>()
+  private static readonly MAX_PENDING_EVENTS_PER_CHANNEL = 50
   private activationStore: ActivationStore
   private cacheDir: string
   private somaClient?: SomaClient  // Optional Soma credit system client
@@ -104,7 +109,22 @@ export class AgentLoop {
 
         if (batch.length > 0) {
           logger.debug({ batchSize: batch.length, queueSize: this.queue.size() }, 'Polled batch from queue')
-          await this.processBatch(batch)
+          // Partition by channel: processBatch treats a batch as a single-channel unit
+          // (channelId from the first event, activation scanned across all events).
+          // A mixed batch could activate in channel A from a mention in channel B,
+          // consuming B's mention without ever replying there.
+          const byChannel = new Map<string, Event[]>()
+          for (const event of batch) {
+            const group = byChannel.get(event.channelId)
+            if (group) {
+              group.push(event)
+            } else {
+              byChannel.set(event.channelId, [event])
+            }
+          }
+          for (const group of byChannel.values()) {
+            await this.processBatch(group)
+          }
         } else {
           // Avoid busy-waiting
           await sleep(100)
@@ -361,6 +381,24 @@ export class AgentLoop {
       }
     }
 
+    // If this channel is already being processed, defer the events instead of
+    // dropping them: they're replayed into the queue when the in-flight activation
+    // finishes. Checked BEFORE shouldActivate (no wasted I/O / double reactions) and
+    // BEFORE m-command deletion (previously an "m continue" sent mid-activation was
+    // deleted from Discord and then silently discarded).
+    if (this.activeChannels.has(firstEvent.channelId)) {
+      const pending = this.pendingChannelEvents.get(firstEvent.channelId) || []
+      pending.push(...events)
+      if (pending.length > AgentLoop.MAX_PENDING_EVENTS_PER_CHANNEL) {
+        const dropped = pending.length - AgentLoop.MAX_PENDING_EVENTS_PER_CHANNEL
+        pending.splice(0, dropped)
+        logger.warn({ channelId: firstEvent.channelId, dropped }, 'Pending event buffer full - dropped oldest events')
+      }
+      this.pendingChannelEvents.set(firstEvent.channelId, pending)
+      logger.debug({ channelId: firstEvent.channelId, pendingCount: pending.length }, 'Channel busy - deferring events for replay')
+      return
+    }
+
     // Check if activation is needed
     if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
       logger.debug('No activation needed')
@@ -397,12 +435,6 @@ export class AgentLoop {
       }
     }
 
-    // Check if this channel is already being processed
-    if (this.activeChannels.has(channelId)) {
-      logger.debug({ channelId }, 'Channel already being processed, skipping')
-      return
-    }
-
     // Mark channel as active and process asynchronously (don't await)
     this.activeChannels.add(channelId)
     
@@ -422,7 +454,7 @@ export class AgentLoop {
     
     if (somaCheckResult.status === 'blocked') {
       // User doesn't have enough ichor - message already sent
-      this.activeChannels.delete(channelId)
+      this.releaseChannel(channelId)
       return
     }
     
@@ -500,8 +532,46 @@ export class AgentLoop {
         logger.error({ error, channelId, guildId }, 'Failed to handle activation')
       })
       .finally(() => {
-        this.activeChannels.delete(channelId)
+        this.releaseChannel(channelId)
       })
+  }
+
+  /**
+   * Stable signature for a tool call: object keys are sorted recursively so the
+   * same semantic input produces the same signature regardless of the key order
+   * the model happened to emit.
+   */
+  private toolCallSignature(name: string, input: Record<string, unknown> | undefined): string {
+    const canonicalize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonicalize)
+      if (value && typeof value === 'object') {
+        const sorted: Record<string, unknown> = {}
+        for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+          sorted[key] = canonicalize((value as Record<string, unknown>)[key])
+        }
+        return sorted
+      }
+      return value
+    }
+    return `${name}:${JSON.stringify(canonicalize(input ?? {}))}`
+  }
+
+  /**
+   * Mark a channel as no longer being processed and replay any events that
+   * arrived (and were deferred) while it was busy.
+   */
+  private releaseChannel(channelId: string): void {
+    this.activeChannels.delete(channelId)
+    const pending = this.pendingChannelEvents.get(channelId)
+    if (pending && pending.length > 0) {
+      this.pendingChannelEvents.delete(channelId)
+      logger.info({ channelId, count: pending.length }, 'Replaying events deferred while channel was busy')
+      for (const event of pending) {
+        this.queue.push(event)
+      }
+    } else {
+      this.pendingChannelEvents.delete(channelId)
+    }
   }
   
   private determineActivationReason(events: Event[]): { 
@@ -914,6 +984,15 @@ export class AgentLoop {
         continue
       }
 
+      // Skip messages from other bots, apps, and webhooks - only respond to real users.
+      // event.data is a discord.js Message, whose property is webhookId (camelCase);
+      // webhook_id kept as a fallback for raw-payload shapes.
+      const hasWebhookId = !!((message as Record<string, unknown>).webhookId || (message as Record<string, unknown>).webhook_id)
+      if (author?.bot || hasWebhookId) {
+        logger.debug({ messageId: message.id, author: author?.username, isBot: author?.bot, hasWebhookId }, 'Skipping bot/webhook message')
+        continue
+      }
+
       // 1. Check for m command FIRST (before mention check)
       // This ensures "m continue <@bot>" gets flagged for deletion
       // Only trigger/delete if addressed to THIS bot (mention or reply)
@@ -976,13 +1055,8 @@ export class AgentLoop {
         return true
       }
 
-      // 3. Check for reply to bot's message (but ignore replies from other bots without mention)
+      // 3. Check for reply to bot's message
       if (reference?.messageId && this.botMessageIds.has(reference.messageId as string)) {
-        // If the replying user is a bot, only activate if they explicitly mentioned us
-        if (author?.bot) {
-          logger.debug({ messageId: message.id, author: author?.username }, 'Ignoring bot reply without mention')
-          continue
-        }
         logger.debug({ messageId: message.id }, 'Activated by reply')
         return true
       }
@@ -2107,6 +2181,9 @@ export class AgentLoop {
     let accumulatedOutput = ''
     let toolDepth = 0
     const allToolCallIds: string[] = []
+    // Exact (name, input) signatures of tools already executed this activation,
+    // used to detect the model looping on identical calls
+    const executedToolSignatures = new Set<string>()
     const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
@@ -2147,6 +2224,14 @@ export class AgentLoop {
       // Get completion (routes to membrane if config.use_membrane is true)
       let completion = await this.completeLLM(continuationRequest, config)
 
+      // Cumulative conversation for native tool rounds. Built lazily from the SAME
+      // transform as the initial call (shared cached prefix), then each round's
+      // tool_use/tool_result exchange is APPENDED - never rebuilt. Rebuilding from
+      // scratch every round (the old behavior) dropped all prior tool exchanges,
+      // so the model couldn't see what it had already called and called it again
+      // (observed in prod: 101 identical web_search calls in one activation).
+      let toolConversation: ProviderMessage[] | null = null
+
       // Handle native tool_use in chat mode
       // IMPORTANT: Capture text content before entering the loop - the model may return
       // text alongside tool_use blocks, and we need to accumulate it before processing tools
@@ -2164,6 +2249,15 @@ export class AgentLoop {
         const toolUseBlocks = completion.content.filter((c: ContentBlock): c is ContentBlock & { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => c.type === 'tool_use')
 
         if (toolUseBlocks.length === 0) break
+
+        // Fail fast on exact repeats: results are now visible in the conversation,
+        // so an identical (name, input) call can only yield the same answer.
+        // A round consisting solely of already-executed calls means the model is looping.
+        const signatures = toolUseBlocks.map(b => this.toolCallSignature(b.name, b.input))
+        if (signatures.every(s => executedToolSignatures.has(s))) {
+          logger.warn({ signatures, toolDepth }, 'Model repeated identical tool calls - stopping tool loop')
+          break
+        }
 
         logger.info({ toolCount: toolUseBlocks.length, toolDepth }, 'Processing native tool_use blocks')
 
@@ -2184,6 +2278,7 @@ export class AgentLoop {
 
           const result = await this.toolSystem.executeTool(toolCall)
           allToolCallIds.push(toolCall.id)
+          executedToolSignatures.add(this.toolCallSignature(toolCall.name, toolCall.input))
 
           // Persist tool call
           await this.toolSystem.persistToolUse(this.botId, channelId, toolCall, result)
@@ -2198,60 +2293,28 @@ export class AgentLoop {
           toolDepth++
         }
 
-        // Build continuation using original completion's context
-        // We need to make a new LLM call with the tool results appended
-        // Use the middleware's transform by creating a proper LLMRequest with tool history
-
-        // For now, make a direct API call with properly formatted messages
-        // Get system prompt from the original request
-        const systemPrompt = continuationRequest.system_prompt || config.system_prompt || ''
-
-        // Transform participant messages to API format
-        const apiMessages: ProviderMessage[] = []
-        if (systemPrompt) {
-          apiMessages.push({ role: 'system', content: systemPrompt })
+        // Build the base conversation ONCE via the middleware's chat transform - the same
+        // transform the initial call went through, so the byte prefix (incl. cache_control
+        // blocks) matches and continuations get prompt-cache reads instead of full price.
+        if (!toolConversation) {
+          toolConversation = this.llmMiddleware.buildChatMessages(continuationRequest)
         }
 
-        // Convert conversation messages (skip system)
-        const srcMessages = continuationRequest.messages || []
-        let buffer: Array<{ participant: string; text: string }> = []
-        const botName = config.name
-
-        for (const msg of srcMessages) {
-          const isBot = msg.participant === botName
-          const text = Array.isArray(msg.content)
-            ? msg.content.filter((c: ContentBlock): c is ContentBlock & { type: 'text'; text: string } => c.type === 'text').map((c) => c.text).join('\n')
-            : (typeof msg.content === 'string' ? msg.content : '')
-
-          if (isBot) {
-            if (buffer.length > 0) {
-              apiMessages.push({ role: 'user', content: buffer.map(m => `${m.participant}: ${m.text}`).join('\n') })
-              buffer = []
-            }
-            if (text.trim()) {
-              apiMessages.push({ role: 'assistant', content: text })
-            }
-          } else {
-            buffer.push({ participant: msg.participant, text })
-          }
-        }
-        if (buffer.length > 0) {
-          apiMessages.push({ role: 'user', content: buffer.map(m => `${m.participant}: ${m.text}`).join('\n') })
-        }
-
-        // Add the assistant's tool_use response and user's tool_result
+        // Append this round's assistant tool_use response and user tool_result
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ContentBlock[] and tool_result content need to be passed to provider
-        apiMessages.push({ role: 'assistant', content: completion.content as any })
+        toolConversation.push({ role: 'assistant', content: completion.content as any })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool results need to be passed to provider
-        apiMessages.push({ role: 'user', content: toolResults as any })
+        toolConversation.push({ role: 'user', content: toolResults as any })
 
-        // Build continuation request with tool results (direct provider format)
+        // Build continuation request with tool results (direct provider format).
+        // Reuse the originating request's model/params - switching models mid-turn
+        // (the old hardcoded Haiku fallback) busts the cache and changes voice.
         const toolContinuationRequest = {
-          messages: apiMessages,
-          model: config.continuation_model || 'claude-haiku-4-5-20251001',
-          temperature: config.temperature ?? 1.0,
-          max_tokens: config.max_tokens ?? 8192,
-          top_p: config.top_p ?? 1.0,
+          messages: toolConversation,
+          model: continuationRequest.config.model,
+          temperature: continuationRequest.config.temperature,
+          max_tokens: continuationRequest.config.max_tokens,
+          top_p: continuationRequest.config.top_p,
           tools: this.toolSystem.getAvailableTools().map(t => ({
             name: t.name,
             description: t.description,
