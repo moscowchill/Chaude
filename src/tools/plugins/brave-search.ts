@@ -12,6 +12,7 @@
 import { ToolPlugin, PluginTool, PluginContext } from './types.js'
 import { createLogger } from '../../utils/logger.js'
 import { extractReadableContent, htmlToMarkdown, truncateText } from './brave-search-utils.js'
+import { fetchPublicPage } from './safe-fetch.js'
 
 const logger = createLogger({ plugin: 'brave-search' })
 
@@ -252,10 +253,10 @@ async function runWebFetch(params: FetchParams): Promise<FetchResult> {
     throw new Error('URL must use http or https protocol')
   }
 
-  const maxChars = Math.max(100, params.maxChars ?? DEFAULT_FETCH_MAX_CHARS)
+  const maxChars = Math.max(100, Math.min(100_000, params.maxChars ?? DEFAULT_FETCH_MAX_CHARS))
 
   // Check cache
-  const cacheKey = normalizeCacheKey(`fetch:${urlString}:${maxChars}`)
+  const cacheKey = `fetch:${urlString}:${maxChars}`
   const cached = readCache(fetchCache, cacheKey)
   if (cached) {
     logger.debug({ url: urlString }, 'Returning cached fetch result')
@@ -264,93 +265,69 @@ async function runWebFetch(params: FetchParams): Promise<FetchResult> {
 
   const start = Date.now()
 
-  // Make request
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  const res = await fetchPublicPage(urlString, DEFAULT_TIMEOUT_MS)
+  const contentType = res.contentType
+  const body = res.body
+  const finalUrl = res.url !== urlString ? res.url : undefined
 
-  try {
-    const res = await fetch(urlString, {
-      method: 'GET',
-      headers: {
-        'Accept': '*/*',
-        'User-Agent': 'Mozilla/5.0 (compatible; Chaude/1.0; +https://github.com/moscowchill/Chaude)',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      signal: controller.signal,
-      redirect: 'follow',
+  let title: string | undefined
+  let text: string
+
+  if (contentType.includes('text/html')) {
+    // Extract readable content
+    const extracted = await extractReadableContent({
+      html: body,
+      url: finalUrl ?? urlString,
+      extractMode: 'markdown',
     })
 
-    if (!res.ok) {
-      const detail = await res.text().catch(() => res.statusText)
-      const truncatedDetail = detail.slice(0, 500)
-      throw new Error(`Fetch failed (${res.status}): ${truncatedDetail}`)
-    }
-
-    const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
-    const body = await res.text()
-    const finalUrl = res.url !== urlString ? res.url : undefined
-
-    let title: string | undefined
-    let text: string
-
-    if (contentType.includes('text/html')) {
-      // Extract readable content
-      const extracted = await extractReadableContent({
-        html: body,
-        url: finalUrl ?? urlString,
-        extractMode: 'markdown',
-      })
-
-      if (extracted) {
-        text = extracted.text
-        title = extracted.title
-      } else {
-        // Fallback to basic conversion
-        const converted = htmlToMarkdown(body)
-        text = converted.text
-        title = converted.title
-      }
-    } else if (contentType.includes('application/json')) {
-      // Pretty-print JSON
-      try {
-        const parsed = JSON.parse(body)
-        text = JSON.stringify(parsed, null, 2)
-      } catch {
-        text = body
-      }
-    } else if (contentType.includes('text/')) {
-      // Plain text
-      text = body
+    if (extracted) {
+      text = extracted.text
+      title = extracted.title
     } else {
-      throw new Error(`Unsupported content type: ${contentType}`)
+      // Fallback to basic conversion
+      const converted = htmlToMarkdown(body)
+      text = converted.text
+      title = converted.title
     }
-
-    // Truncate if needed
-    const truncated = truncateText(text, maxChars)
-
-    const result: FetchResult = {
-      url: urlString,
-      finalUrl,
-      title,
-      text: truncated.text,
-      truncated: truncated.truncated,
-      tookMs: Date.now() - start,
+  } else if (contentType.includes('application/json')) {
+    // Pretty-print JSON
+    try {
+      const parsed = JSON.parse(body)
+      text = JSON.stringify(parsed, null, 2)
+    } catch {
+      text = body
     }
-
-    // Cache result
-    writeCache(fetchCache, cacheKey, result, FETCH_CACHE_TTL_MS, FETCH_CACHE_MAX)
-    logger.info({
-      url: urlString,
-      title,
-      length: truncated.text.length,
-      truncated: truncated.truncated,
-      tookMs: result.tookMs,
-    }, 'Web fetch completed')
-
-    return result
-  } finally {
-    clearTimeout(timeout)
+  } else if (contentType.includes('text/')) {
+    // Plain text
+    text = body
+  } else {
+    throw new Error(`Unsupported content type: ${contentType}`)
   }
+
+  // Truncate if needed
+  const truncated = truncateText(text, maxChars)
+
+  const result: FetchResult = {
+    url: urlString,
+    finalUrl,
+    title,
+    text: truncated.text,
+    truncated: truncated.truncated,
+    tookMs: Date.now() - start,
+  }
+
+  // Cache result
+  writeCache(fetchCache, cacheKey, result, FETCH_CACHE_TTL_MS, FETCH_CACHE_MAX)
+  logger.info({
+    url: urlString,
+    title,
+    length: truncated.text.length,
+    truncated: truncated.truncated,
+    tookMs: result.tookMs,
+  }, 'Web fetch completed')
+
+  return result
 }
 
 // =============================================================================
@@ -417,7 +394,7 @@ const webFetchTool: PluginTool<FetchParams, string> = {
     properties: {
       url: {
         type: 'string',
-        description: 'The URL to fetch (must be http or https)',
+        description: 'Public HTTP or HTTPS URL on its default port; response limit is 2 MiB',
       },
       maxChars: {
         type: 'number',

@@ -10,9 +10,9 @@
 
 import { ToolPlugin, PluginTool, PluginContext } from './types.js'
 import { createLogger } from '../../utils/logger.js'
-import { readFile, stat } from 'fs/promises'
-import { existsSync } from 'fs'
 import { extname } from 'path'
+import { createRequire } from 'node:module'
+import { readAllowedFile } from './safe-file.js'
 
 const logger = createLogger({ plugin: 'read-file' })
 
@@ -47,14 +47,16 @@ interface ReadFileInput {
 // Dynamic import for pdf-parse (optional dependency)
 // Using v1.x API which is more stable in Node.js
 type PdfParseResult = { text: string; numPages: number }
-type PdfParseFn = (buffer: Buffer) => Promise<{ text: string; numpages: number }>
+type PdfParseFn = (buffer: Uint8Array) => Promise<{ text: string; numpages: number }>
 let pdfParseFn: PdfParseFn | null | undefined = null
 
 async function loadPdfParse(): Promise<PdfParseFn | null> {
   if (pdfParseFn === null) {
     try {
-      const module = await import('pdf-parse')
-      pdfParseFn = module.default as PdfParseFn
+      // createRequire avoids pdf-parse's standalone debug branch under Node 22 ESM.
+      const module: unknown = createRequire(import.meta.url)('pdf-parse')
+      // The bundled pdf.js accepts Uint8Array; upstream typings only declare Buffer.
+      pdfParseFn = module as PdfParseFn
     } catch {
       // pdf-parse not installed
       pdfParseFn = undefined
@@ -69,7 +71,8 @@ async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
     throw new Error('PDF support not available')
   }
 
-  const result = await parse(buffer)
+  // pdf.js expects slice() to copy; Node Buffer.slice() returns a view.
+  const result = await parse(new Uint8Array(buffer))
   return {
     text: result.text,
     numPages: result.numpages,
@@ -78,7 +81,7 @@ async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
 
 const readFileTool: PluginTool<ReadFileInput, string> = {
   name: 'read_file',
-  description: `Read the contents of a file from the local filesystem.
+  description: `Read a file from directories explicitly allowed by the server owner.
 
 Supported file types:
 - Text files: .txt, .md, .json, .yaml, .xml, .csv, .log, and most code files
@@ -114,27 +117,10 @@ Maximum output is ~100,000 characters (truncated if exceeded).`,
     logger.info({ path, encoding, start_line, end_line, channelId: context.channelId }, 'Reading file')
 
     try {
-      // Check if file exists
-      if (!existsSync(path)) {
-        return `Error: File not found: ${path}`
-      }
-
-      // Get file stats
-      const fileStats = await stat(path)
-      if (fileStats.isDirectory()) {
-        return `Error: Path is a directory, not a file: ${path}`
-      }
-
       const ext = extname(path).toLowerCase()
       const isPdf = ext === '.pdf'
-
-      // Check file size
       const maxSize = isPdf ? MAX_PDF_FILE_SIZE : MAX_TEXT_FILE_SIZE
-      if (fileStats.size > maxSize) {
-        const sizeMB = (fileStats.size / 1024 / 1024).toFixed(1)
-        const limitMB = (maxSize / 1024 / 1024).toFixed(0)
-        return `Error: File too large (${sizeMB}MB). Maximum for ${isPdf ? 'PDF' : 'text'} files is ${limitMB}MB.`
-      }
+      const buffer = await readAllowedFile(path, maxSize)
 
       let content: string
 
@@ -145,7 +131,6 @@ Maximum output is ~100,000 characters (truncated if exceeded).`,
           return 'Error: PDF support not available. Install pdf-parse package: npm install pdf-parse'
         }
 
-        const buffer = await readFile(path)
         const pdfData = await parsePdf(buffer)
         content = pdfData.text
 
@@ -163,7 +148,6 @@ Maximum output is ~100,000 characters (truncated if exceeded).`,
           logger.warn({ path, ext }, 'Reading file with unknown extension as text')
         }
 
-        const buffer = await readFile(path)
         content = buffer.toString(encoding as BufferEncoding)
       }
 
@@ -192,7 +176,7 @@ Maximum output is ~100,000 characters (truncated if exceeded).`,
         content += `\n\n[... truncated, showing ${MAX_OUTPUT_CHARS.toLocaleString()} of ${truncatedLength.toLocaleString()} characters]`
       }
 
-      logger.info({ path, size: fileStats.size, outputLength: content.length }, 'File read successfully')
+      logger.info({ path, size: buffer.length, outputLength: content.length }, 'File read successfully')
 
       return content
 
