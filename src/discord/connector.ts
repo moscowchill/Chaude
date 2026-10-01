@@ -19,6 +19,8 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
+import { installControls, type ControlsOptions } from './controls.js'
+import { canImportHistory, historyAuthor } from './history-access.js'
 import { WelcomeService, type WelcomeConfig } from './welcome.js'
 
 export interface ConnectorOptions {
@@ -26,6 +28,7 @@ export interface ConnectorOptions {
   cacheDir: string
   maxBackoffMs: number
   welcome?: WelcomeConfig
+  ignoreWebhooks?: boolean
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 500_000  // ~500 KB raw text (summarizer handles oversized docs)
@@ -83,6 +86,10 @@ export class DiscordConnector {
   private welcomeService?: WelcomeService
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
+  async installControls(options: ControlsOptions): Promise<void> {
+    await installControls(this.client, options)
+  }
+
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
 
@@ -302,7 +309,8 @@ export class DiscordConnector {
             undefined,
             Math.max(0, depth - messages.length),  // Remaining message budget
             authorized_roles,
-            ignoreHistory
+            ignoreHistory,
+            channel
           )
           
           logger.debug({
@@ -390,6 +398,7 @@ export class DiscordConnector {
 
       startProfile('messageConvert')
       // Convert to our format (with reply username lookup)
+      if (this.options.ignoreWebhooks) messages = messages.filter(message => !message.webhookId)
       const messageMap = new Map(messages.map(m => [m.id, m]))
       const discordMessages: DiscordMessage[] = messages.map((msg) => this.convertMessage(msg, messageMap))
       endProfile('messageConvert')
@@ -571,8 +580,13 @@ export class DiscordConnector {
     stopAtId: string | undefined,
     maxMessages: number,
     authorizedRoles?: string[],
-    ignoreHistory?: boolean
+    ignoreHistory?: boolean,
+    destination: TextChannel = channel,
+    visited: Set<string> = new Set()
   ): Promise<Message[]> {
+    const key = `${channel.id}:${startFromId || 'latest'}`
+    if (visited.size >= 5 || visited.has(key)) return []
+    visited.add(key)
     const results: Message[] = []
     let currentBefore = startFromId
     const batchSize = 100
@@ -658,19 +672,8 @@ export class DiscordConnector {
         if (message.content?.startsWith('.history') && !ignoreHistory) {
           logger.debug({ messageId: message.id, content: message.content }, 'Found .history command during traversal')
 
-          // Check authorization
-          let authorized = true
-          if (authorizedRoles && authorizedRoles.length > 0) {
-            const member = message.member
-            if (member) {
-              const memberRoles = member.roles.cache.map((r) => r.name)
-              authorized = authorizedRoles.some((role: string) => memberRoles.includes(role))
-            } else {
-              authorized = false
-            }
-          }
-
-          if (authorized) {
+          const member = await historyAuthor(message, authorizedRoles || [])
+          if (member && canImportHistory(member, channel, destination)) {
             const historyRange = this.parseHistoryCommand(message.content)
             
             logger.debug({ 
@@ -717,7 +720,7 @@ export class DiscordConnector {
                 ? await this.client.channels.fetch(targetChannelId) as TextChannel
                 : channel
 
-              if (targetChannel && targetChannel.isTextBased()) {
+              if (targetChannel && targetChannel.isTextBased() && canImportHistory(member, targetChannel, destination)) {
                 const histLastId = this.extractMessageIdFromUrl(historyRange.last) || undefined
                 const histFirstId = historyRange.first ? (this.extractMessageIdFromUrl(historyRange.first) || undefined) : undefined
 
@@ -741,7 +744,9 @@ export class DiscordConnector {
                   histFirstId,     // Start point (stop when reached, or undefined)
                   maxMessages - results.length - batchResults.length,  // Account for current batch
                   authorizedRoles,
-                  ignoreHistory    // Pass through (though this path only runs when ignoreHistory is false)
+                  ignoreHistory,
+                  destination,
+                  visited
                 )
 
                 logger.debug({ 
@@ -783,7 +788,7 @@ export class DiscordConnector {
 
           // This should never be reached if .history was processed above
           // Skip the .history command itself if somehow we get here
-          logger.warn({ messageId: message.id }, 'Unexpected: reached .history skip without processing')
+          logger.debug({ messageId: message.id }, 'Ignored unauthorized or invalid .history command')
           continue
         }
 

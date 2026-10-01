@@ -11,7 +11,8 @@
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write src/**/*.ts",
     "test": "vitest",
-    "test:watch": "vitest --watch"
+    "test:watch": "vitest --watch",
+    "eval:knowledge": "tsx src/knowledge/evaluate.ts"
   },
   "keywords": [
     "discord",

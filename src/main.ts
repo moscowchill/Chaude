@@ -12,6 +12,9 @@ import { DiscordConnector } from './discord/connector.js'
 import { loadWelcomeConfig } from './discord/welcome.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
+import { KnowledgeBase } from './knowledge/base.js'
+import { DailyBudget, type ModelPrice } from './llm/budget.js'
+import { memoryQueue } from './utils/atomic-state.js'
 import { LLMMiddleware } from './llm/middleware.js'
 import { AnthropicProvider } from './llm/providers/anthropic.js'
 import { OpenAIProvider } from './llm/providers/openai.js'
@@ -89,8 +92,14 @@ async function main() {
     const stateManager = new ChannelStateManager()
     const configSystem = new ConfigSystem(configPath)
     const contextBuilder = new ContextBuilder()
-    const llmMiddleware = new LLMMiddleware()
+    const budget = process.env.DAILY_BUDGET_USD !== undefined
+      ? new DailyBudget(join(cachePath, 'spending.json'), Number(process.env.DAILY_BUDGET_USD),
+          JSON.parse(process.env.LLM_PRICING_JSON || '{}') as Record<string, ModelPrice>)
+      : undefined
+    if (budget) await budget.status()
+    const llmMiddleware = new LLMMiddleware(budget)
     const toolSystem = new ToolSystem(toolsPath)
+    const knowledge = process.env.KNOWLEDGE_FILE ? new KnowledgeBase(process.env.KNOWLEDGE_FILE) : undefined
 
     // Load vendor configs and register providers
     const vendorConfigs = configSystem.loadVendors()
@@ -171,6 +180,7 @@ async function main() {
       cacheDir: cachePath + '/images',
       maxBackoffMs: 32000,
       welcome: loadWelcomeConfig(process.env, cachePath),
+      ignoreWebhooks: process.env.IGNORE_WEBHOOK_MESSAGES === 'true',
     })
 
     await connector.start()
@@ -196,8 +206,17 @@ async function main() {
       configSystem,
       contextBuilder,
       llmMiddleware,
-      toolSystem
+      toolSystem,
+      cachePath,
+      knowledge
     )
+
+    const guildIds = (process.env.CONTROL_GUILD_IDS || '').split(',').map(id => id.trim()).filter(Boolean)
+    if (guildIds.length) await connector.installControls({
+      guildIds, cacheDir: cachePath, knowledge, budget,
+      getLastFailure: () => llmMiddleware.lastFailure,
+      getModel: guildId => configSystem.loadConfig({ botName, guildId, channelConfigs: [] }).continuation_model,
+    })
 
     // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
@@ -233,6 +252,7 @@ async function main() {
       logger.info({ signal }, 'Shutting down')
 
       agentLoop.stop()
+      await memoryQueue.drain()
       if (apiServer) {
         await apiServer.stop()
       }

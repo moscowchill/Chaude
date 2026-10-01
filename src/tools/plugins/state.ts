@@ -9,6 +9,7 @@
 
 import { promises as fs } from 'fs'
 import path from 'path'
+import { atomicJson } from '../../utils/atomic-state.js'
 import { logger } from '../../utils/logger.js'
 
 export type StateScope = 'global' | 'channel' | 'epic' | 'off'
@@ -65,7 +66,7 @@ export class PluginStateManager {
   
   async setGlobalState<T>(state: T): Promise<void> {
     await fs.mkdir(path.dirname(this.globalPath), { recursive: true })
-    await fs.writeFile(this.globalPath, JSON.stringify(state, null, 2))
+    await atomicJson(this.globalPath, state, true)
     this.globalCache = state
     logger.debug({ pluginId: this.pluginId }, 'Saved global state')
   }
@@ -110,7 +111,7 @@ export class PluginStateManager {
               origin: inheritFrom.historyOriginChannelId 
             }, 'Inheriting channel state from .history origin')
             return {
-              state: origin.state,
+              state: structuredClone(origin.state),
               metadata: {
                 ...origin.metadata,
                 historyOriginChannelId: inheritFrom.historyOriginChannelId,
@@ -129,7 +130,7 @@ export class PluginStateManager {
               parent: inheritFrom.parentChannelId 
             }, 'Inheriting channel state from parent channel')
             return {
-              state: parent.state,
+              state: structuredClone(parent.state),
               metadata: {
                 ...parent.metadata,
                 parentChannelId: inheritFrom.parentChannelId,
@@ -158,7 +159,7 @@ export class PluginStateManager {
     
     const data = { state, metadata }
     await fs.mkdir(path.dirname(this.channelPath(channelId)), { recursive: true })
-    await fs.writeFile(this.channelPath(channelId), JSON.stringify(data, null, 2))
+    await atomicJson(this.channelPath(channelId), data, true)
     this.channelCache.set(channelId, data)
     
     logger.debug({ 
@@ -197,7 +198,7 @@ export class PluginStateManager {
   
   private async saveEpicEvents(channelId: string, events: StateEvent[]): Promise<void> {
     await fs.mkdir(path.dirname(this.epicEventsPath(channelId)), { recursive: true })
-    await fs.writeFile(this.epicEventsPath(channelId), JSON.stringify(events, null, 2))
+    await atomicJson(this.epicEventsPath(channelId), events, true)
     this.epicEventsCache.set(channelId, events)
   }
   
