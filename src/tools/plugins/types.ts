@@ -47,7 +47,7 @@ export interface ToolPlugin {
 
   /**
    * Called after a successful activation completes (response sent to Discord).
-   * Runs in background - not awaited. Use for background tasks like context compaction.
+   * Awaited before trace finalization. Use for tasks like context compaction.
    * @param context Plugin state context
    * @param result Activation result metadata
    */
@@ -124,6 +124,7 @@ export interface VisibleImage {
  * Basic plugin context for tool execution
  */
 export interface PluginContext {
+  recentConversation?: string
   botId: string
   channelId: string
   guildId: string

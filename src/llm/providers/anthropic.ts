@@ -26,7 +26,22 @@ export class AnthropicProvider implements LLMProvider {
   private client: Anthropic
 
   constructor(apiKey: string) {
-    this.client = new Anthropic({ apiKey })
+    this.client = new Anthropic({ apiKey, maxRetries: 0, timeout: 120_000 })
+  }
+
+  async countInputTokens(request: ProviderRequest): Promise<number> {
+    const system = request.messages.filter(m => m.role === 'system').flatMap(m =>
+      typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content)
+    const params = {
+      model: request.model,
+      system: system.length ? system : undefined,
+      messages: request.messages.filter(m => m.role !== 'system'),
+      tools: request.tools?.length ? request.tools : undefined,
+    }
+    const count = await this.client.beta.messages.countTokens(
+      params as unknown as Parameters<typeof this.client.beta.messages.countTokens>[0]
+    )
+    return count.input_tokens
   }
 
   async complete(request: ProviderRequest): Promise<LLMCompletion> {

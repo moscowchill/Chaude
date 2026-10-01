@@ -16,14 +16,16 @@ import {
   VendorConfig,
   ToolDefinition,
 } from '../types.js'
+import { DailyBudget } from './budget.js'
 import { logger } from '../utils/logger.js'
-import { retryLLMWithRateLimit } from '../utils/retry.js'
+import { llmErrorStatus, retryLLMWithRateLimit } from '../utils/retry.js'
 import { matchesAny } from '../utils/validation.js'
 
 export interface LLMProvider {
   readonly name: string
   readonly supportedModes: ('prefill' | 'chat')[]
   complete(request: ProviderRequest): Promise<LLMCompletion>
+  countInputTokens?(request: ProviderRequest): Promise<number>
 }
 
 /** Content block for Anthropic API messages */
@@ -64,10 +66,11 @@ export interface ProviderMessage {
 }
 
 export class LLMMiddleware {
+  lastFailure?: { at: string; status?: number }
   private providers = new Map<string, LLMProvider>()
   private vendorConfigs: Record<string, VendorConfig> = {}
 
-  constructor() {}
+  constructor(readonly budget?: DailyBudget) {}
 
   /**
    * Register a provider
@@ -106,28 +109,22 @@ export class LLMMiddleware {
         ? this.transformToPrefill(request, provider)
         : this.transformToChat(request, provider)
 
-    // Execute with retries (rate-limit aware)
-    const completion = await retryLLMWithRateLimit(
-      () => provider.complete(providerRequest),
-      3  // TODO: Get from config
-    )
-
-    return completion
+    return this.callProvider(provider, providerRequest)
   }
 
-  /**
-   * Complete a raw provider request directly (bypasses message transformation)
-   * Used for tool continuations in chat mode where we need to send tool_use/tool_result blocks
-   */
+  /** Raw provider requests include tool continuations and background memory calls. */
   async completeRaw(request: ProviderRequest): Promise<LLMCompletion> {
-    const provider = this.selectProvider(request.model)
+    return this.callProvider(this.selectProvider(request.model), request)
+  }
 
-    const completion = await retryLLMWithRateLimit(
-      () => provider.complete(request),
-      3
-    )
-
-    return completion
+  private async callProvider(provider: LLMProvider, request: ProviderRequest): Promise<LLMCompletion> {
+    try {
+      return await retryLLMWithRateLimit(() => this.budget
+        ? this.budget.complete(provider, request) : provider.complete(request), 3)
+    } catch (error) {
+      this.lastFailure = { at: new Date().toISOString(), status: llmErrorStatus(error) }
+      throw error
+    }
   }
 
   private selectProvider(modelName: string): LLMProvider {
