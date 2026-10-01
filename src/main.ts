@@ -9,6 +9,7 @@ import { EventQueue } from './agent/event-queue.js'
 import { AgentLoop } from './agent/loop.js'
 import { ChannelStateManager } from './agent/state-manager.js'
 import { DiscordConnector } from './discord/connector.js'
+import { loadWelcomeConfig } from './discord/welcome.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
 import { LLMMiddleware } from './llm/middleware.js'
@@ -169,6 +170,7 @@ async function main() {
       token: discordToken,
       cacheDir: cachePath + '/images',
       maxBackoffMs: 32000,
+      welcome: loadWelcomeConfig(process.env, cachePath),
     })
 
     await connector.start()
@@ -257,4 +259,3 @@ main().catch((error) => {
   console.error('Unhandled error:', error)
   process.exit(1)
 })
-

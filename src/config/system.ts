@@ -168,6 +168,15 @@ export class ConfigSystem {
       
       // Remove target field from config (it's metadata, not a config value)
       delete config.target
+
+      // Discord content may tune conversation settings, but host capabilities
+      // and local file paths are controlled exclusively by on-disk config.
+      for (const key of Object.keys(config)) {
+        if (['mcp_servers', 'tool_plugins', 'vendors'].includes(key) ||
+            /(?:api_key|token|secret|password|_file)$/i.test(key)) {
+          delete config[key]
+        }
+      }
       
       return config
     } catch (error) {
@@ -356,4 +365,3 @@ export class ConfigSystem {
     }
   }
 }
-

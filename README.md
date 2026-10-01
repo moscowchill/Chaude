@@ -380,6 +380,26 @@ git ls-remote https://github.com/antra-tess/membrane.git refs/heads/main | cut -
 - Discord bot token (`DISCORD_TOKEN` in `.env`)
 - LLM API keys (`ANTHROPIC_API_KEY`, etc. in `.env`)
 
+## Automatic welcomes
+
+Set `WELCOME_GUILD_ID` and `WELCOME_CHANNEL_ID` in `.env`, then enable Server Members Intent in the Discord developer portal. The bot welcomes human members in that channel after any membership screening completes. It requires View Channel and Send Messages permissions.
+
+`WELCOME_MESSAGE` optionally overrides the greeting; `{user}` becomes the new member's mention. Welcomes use a fixed message without an LLM call. Duplicate events are suppressed using persisted state in the cache directory and a Discord message nonce. A later rejoin can receive another welcome. Keep the cache directory across restarts.
+
+## Tool access
+
+- Uploaded text and PDF attachments are processed directly from Discord. This works with the `read-file` plugin disabled.
+- `read_file` denies access by default. Operators may set `READ_FILE_ALLOWED_DIRS` to explicit absolute directories containing curated, non-secret documents, separated by the platform path separator. Paths outside these directories, including symlink escapes, are rejected.
+- `web_fetch` accepts public HTTP(S) pages on their default ports. It checks DNS results and each redirect, pins connections to checked addresses, and limits downloads to 2 MiB. Private, loopback, link-local, and reserved destinations are blocked.
+- Pinned channel configuration cannot grant plugins, launch MCP servers, or select local prompt files. Set those capabilities in the host configuration.
+- Bot messages suppress everyone and role notifications. Welcomes can notify only the joining member.
+
+### Optional Linux filesystem sandbox
+
+After building, `bash scripts/sandbox.sh` starts the bot using bubblewrap. The launcher exposes code, dependencies, configuration, and `.env` as read-only inputs; only `cache`, `logs`, and `tools` persist writes. It uses the default application paths and loads bot settings from `.env`. Other home directories and host processes are hidden.
+
+Install bubblewrap through your operating system. `NODE_BINARY` can select a Node executable, and `SANDBOX_APPARMOR_PROFILE` can select an administrator-created profile on hosts that restrict user namespaces. The launcher fails if the sandbox cannot be established. Network access remains available for Discord, model providers, and public web pages; the web-fetch tool enforces its own destination policy.
+
 ## REST API
 
 If enabled with `API_BEARER_TOKEN`, the bot exposes a REST API for accessing Discord conversation history.
@@ -426,4 +446,3 @@ Chaude is developed to be compatible and interoperable with the [chapter2](https
 ## License
 
 MIT
-

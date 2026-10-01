@@ -7,6 +7,7 @@ import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'dis
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
+import { createRequire } from 'node:module'
 import sharp from 'sharp'
 import { EventQueue } from '../agent/event-queue.js'
 import {
@@ -18,11 +19,13 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
+import { WelcomeService, type WelcomeConfig } from './welcome.js'
 
 export interface ConnectorOptions {
   token: string
   cacheDir: string
   maxBackoffMs: number
+  welcome?: WelcomeConfig
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 500_000  // ~500 KB raw text (summarizer handles oversized docs)
@@ -33,14 +36,16 @@ const MAX_PDF_PAGES_FULL = 10  // PDFs over this get a "too long" warning
 // Dynamic import for pdf-parse (optional dependency)
 // Using v1.x API which is more stable in Node.js
 type PdfParseResult = { text: string; numPages: number }
-type PdfParseFn = (buffer: Buffer) => Promise<{ text: string; numpages: number }>
+type PdfParseFn = (buffer: Uint8Array) => Promise<{ text: string; numpages: number }>
 let pdfParseFn: PdfParseFn | null | undefined = null
 
 async function loadPdfParse(): Promise<PdfParseFn | null> {
   if (pdfParseFn === null) {
     try {
-      const module = await import('pdf-parse')
-      pdfParseFn = module.default as PdfParseFn
+      // createRequire avoids pdf-parse's standalone debug branch under Node 22 ESM.
+      const module: unknown = createRequire(import.meta.url)('pdf-parse')
+      // The bundled pdf.js accepts Uint8Array; upstream typings only declare Buffer.
+      pdfParseFn = module as PdfParseFn
     } catch {
       pdfParseFn = undefined
     }
@@ -54,7 +59,8 @@ async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
     throw new Error('PDF support not available')
   }
 
-  const result = await parse(buffer)
+  // pdf.js expects slice() to copy; Node Buffer.slice() returns a view.
+  const result = await parse(new Uint8Array(buffer))
   return {
     text: result.text,
     numPages: result.numpages,
@@ -74,6 +80,7 @@ export interface FetchContextParams {
 
 export class DiscordConnector {
   private client: Client
+  private welcomeService?: WelcomeService
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
@@ -84,13 +91,32 @@ export class DiscordConnector {
     private options: ConnectorOptions
   ) {
     this.client = new Client({
+      allowedMentions: { parse: ['users'], repliedUser: false },
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
+        ...(options.welcome ? [GatewayIntentBits.GuildMembers] : []),
       ],
     })
+
+    if (options.welcome) {
+      this.welcomeService = new WelcomeService(options.welcome, async (message) => {
+        await retryDiscord(async () => {
+          const channel = await this.client.channels.fetch(message.channelId)
+          if (!(channel instanceof TextChannel) || channel.guildId !== message.guildId) {
+            throw new DiscordError('Welcome channel must be a text channel in the configured server')
+          }
+          await channel.send({
+            content: message.content,
+            allowedMentions: { parse: [], users: [message.userId], repliedUser: false },
+            nonce: message.nonce,
+            enforceNonce: true,
+          })
+        }, this.options.maxBackoffMs)
+      })
+    }
 
     this.setupEventHandlers()
 
@@ -1462,6 +1488,32 @@ export class DiscordConnector {
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
+      if (this.options.welcome) {
+        logger.info({ guildId: this.options.welcome.guildId, channelId: this.options.welcome.channelId }, 'Automatic member welcomes enabled')
+      }
+    })
+
+    this.client.on('guildMemberAdd', (member) => {
+      void this.welcomeService?.welcome({
+        guildId: member.guild.id,
+        userId: member.id,
+        isBot: member.user.bot,
+        pending: member.pending,
+        joinedTimestamp: member.joinedTimestamp,
+      })
+    })
+
+    // Membership screening can delay a new member's admission.
+    this.client.on('guildMemberUpdate', (previous, member) => {
+      if (previous.pending && !member.pending) {
+        void this.welcomeService?.welcome({
+          guildId: member.guild.id,
+          userId: member.id,
+          isBot: member.user.bot,
+          pending: member.pending,
+          joinedTimestamp: member.joinedTimestamp,
+        })
+      }
     })
 
     this.client.on('messageCreate', (message) => {
@@ -1988,4 +2040,3 @@ export class DiscordConnector {
     return chunks
   }
 }
-
