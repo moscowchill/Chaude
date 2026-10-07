@@ -112,4 +112,40 @@ describe('persistent daily model budget', () => {
     await writeFile(file(), JSON.stringify({ version: 1, days: [] }))
     await expect(new DailyBudget(file(), 2).status()).rejects.toThrow('ledger')
   })
+  describe('Claude Haiku 5.5 rate cards', () => {
+    const haiku = { ...request, model: 'claude-haiku-5-5' }
+    function used(usage: Record<string, number>, counted = 100): LLMProvider {
+      const p = provider()
+      p.countInputTokens = vi.fn().mockResolvedValue(counted)
+      p.complete = vi.fn().mockResolvedValue({ content: [], stopReason: 'end_turn', usage })
+      return p
+    }
+    it('charges prompts up to 100,000 tokens at the short-prompt rates', async () => {
+      const usage = { inputTokens: 1000, outputTokens: 100, cacheCreationTokens: 2000, cacheReadTokens: 10000 }
+      await new DailyBudget(file(), 2).complete(used(usage), haiku)
+      // 1000 x 0.10 + 100 x 0.50 + 2000 x 0.20 + 10000 x 0.01 micro-dollars
+      expect((await new DailyBudget(file(), 2).status()).usedUsd).toBe(0.00065)
+    })
+    it('charges a longer prompt, cache reads included, at the long-prompt rates', async () => {
+      const usage = { inputTokens: 1000, outputTokens: 100, cacheCreationTokens: 0, cacheReadTokens: 100_000 }
+      await new DailyBudget(file(), 2).complete(used(usage), haiku)
+      // 1000 x 0.50 + 100 x 2.50 + 100000 x 0.05 micro-dollars
+      expect((await new DailyBudget(file(), 2).status()).usedUsd).toBe(0.00575)
+    })
+    it('reserves a counted long prompt at the long-prompt rates', async () => {
+      const p = used({ inputTokens: 0, outputTokens: 0 }, 120_000)
+      // (126000 + 1024) x 1.00 + 1000 x 2.50 = $0.1295 reserved; the short card would hold $0.026
+      await expect(new DailyBudget(file(), 0.1).complete(p, haiku)).rejects.toThrow('too little')
+      expect(p.complete).not.toHaveBeenCalled()
+    })
+    it('rejects an invalid long-prompt card', () => {
+      const bad = { input: 1, output: 1, cacheWrite: 1, cacheRead: 1 }
+      expect(() => new DailyBudget(file(), 2, { m: { ...bad, longPrompt: { ...bad, overTokens: 0 } } })).toThrow(
+        'Invalid model pricing'
+      )
+      expect(() => new DailyBudget(file(), 2, { m: { ...bad, longPrompt: { ...bad, output: 0, overTokens: 5 } } })).toThrow(
+        'Invalid model pricing'
+      )
+    })
+  })
 })

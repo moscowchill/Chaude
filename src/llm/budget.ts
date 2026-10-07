@@ -6,19 +6,35 @@ import type { LLMProvider, ProviderRequest } from './middleware.js'
 import { llmErrorStatus } from '../utils/retry.js'
 
 export class BudgetError extends Error {}
-export interface ModelPrice {
+export interface RateCard {
   input: number
   output: number
   cacheWrite: number
   cacheRead: number
 }
-// USD per million tokens, checked against Anthropic pricing on 2026-10-01.
+export interface ModelPrice extends RateCard {
+  /** Higher rates for prompts over `overTokens` input tokens, cache reads and writes included */
+  longPrompt?: RateCard & { overTokens: number }
+}
+const RATE_KEYS = ['input', 'output', 'cacheWrite', 'cacheRead'] as const
+// USD per million tokens, checked against Anthropic pricing on 2026-10-07.
 // Cache writes use the conservative one-hour rate.
 const PRICES: Record<string, ModelPrice> = {
+  'claude-haiku-5-5': {
+    input: 0.1,
+    output: 0.5,
+    cacheWrite: 0.2,
+    cacheRead: 0.01,
+    longPrompt: { overTokens: 100_000, input: 0.5, output: 2.5, cacheWrite: 1, cacheRead: 0.05 }
+  },
   'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.1 },
   'claude-haiku-4-5': { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.1 },
   'claude-opus-4-6': { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.5 },
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.3 }
+}
+/** The rates that apply to a prompt of `promptTokens` input tokens */
+function rateCard(price: ModelPrice, promptTokens: number): RateCard {
+  return price.longPrompt && promptTokens > price.longPrompt.overTokens ? price.longPrompt : price
 }
 interface Day {
   charged: number
@@ -46,9 +62,14 @@ export class DailyBudget {
     if (!Number.isSafeInteger(this.limitMicros)) throw new Error('Invalid DAILY_BUDGET_USD')
     this.prices = { ...PRICES, ...prices }
     for (const price of Object.values(this.prices)) {
-      for (const key of ['input', 'output', 'cacheWrite', 'cacheRead'] as const) {
-        if (!Number.isFinite(price[key]) || price[key] <= 0)
-          throw new Error('Invalid model pricing')
+      const long = price.longPrompt
+      if (long && (!Number.isSafeInteger(long.overTokens) || long.overTokens <= 0))
+        throw new Error('Invalid model pricing')
+      for (const card of long ? [price, long] : [price]) {
+        for (const key of RATE_KEYS) {
+          if (!Number.isFinite(card[key]) || card[key] <= 0)
+            throw new Error('Invalid model pricing')
+        }
       }
     }
   }
@@ -120,9 +141,11 @@ export class DailyBudget {
       throw new BudgetError('Input token counting failed.')
     // Counting can differ slightly from billing. Reserve padding and maximum output,
     // with every input token charged at the highest configured input/cache rate.
+    const padded = Math.ceil(tokens * 1.05) + 1024
+    const reserveRates = rateCard(price, padded)
     const reserve = Math.ceil(
-      (Math.ceil(tokens * 1.05) + 1024) * Math.max(price.input, price.cacheWrite, price.cacheRead) +
-        request.max_tokens * price.output
+      padded * Math.max(reserveRates.input, reserveRates.cacheWrite, reserveRates.cacheRead) +
+        request.max_tokens * reserveRates.output
     )
     const id = randomUUID()
     const day = this.now().toISOString().slice(0, 10)
@@ -161,11 +184,15 @@ export class DailyBudget {
         usage.cacheReadTokens || 0
       ].every((n) => Number.isSafeInteger(n) && n >= 0)
     ) {
+      const rates = rateCard(
+        price,
+        usage.inputTokens + (usage.cacheCreationTokens || 0) + (usage.cacheReadTokens || 0)
+      )
       const cost = Math.ceil(
-        usage.inputTokens * price.input +
-          usage.outputTokens * price.output +
-          (usage.cacheCreationTokens || 0) * price.cacheWrite +
-          (usage.cacheReadTokens || 0) * price.cacheRead
+        usage.inputTokens * rates.input +
+          usage.outputTokens * rates.output +
+          (usage.cacheCreationTokens || 0) * rates.cacheWrite +
+          (usage.cacheReadTokens || 0) * rates.cacheRead
       )
       await this.settle(day, id, cost)
     }
