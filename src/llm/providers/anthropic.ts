@@ -5,11 +5,12 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
-import { LLMProvider, ProviderRequest, AnthropicContentBlock } from '../middleware.js'
+import { LLMProvider, ProviderRequest, ProviderMessage, AnthropicContentBlock } from '../middleware.js'
 import { LLMCompletion, ContentBlock, LLMError, TextContent } from '../../types.js'
 import { logger } from '../../utils/logger.js'
 import { getCurrentTrace } from '../../trace/index.js'
 import { processRequestForLogging } from '../../utils/blob-store.js'
+import { anthropicModelRules } from './anthropic-models.js'
 
 // Extended usage type to include cache tokens (not in base Anthropic types)
 interface AnthropicUsageWithCache {
@@ -26,7 +27,42 @@ export class AnthropicProvider implements LLMProvider {
   private client: Anthropic
 
   constructor(apiKey: string) {
-    this.client = new Anthropic({ apiKey })
+    this.client = new Anthropic({ apiKey, maxRetries: 0, timeout: 120_000 })
+  }
+
+  /**
+   * The non-system turns to send. Models that reject an assistant prefill get the
+   * conversation up to its last user turn: in chat mode a trailing assistant turn only
+   * happens when the bot's own message is the newest one in the channel.
+   */
+  private conversation(model: string, messages: ProviderMessage[]): ProviderMessage[] {
+    const turns = messages.filter((m) => m.role !== 'system')
+    if (anthropicModelRules(model).assistantPrefill) return turns
+    let end = turns.length
+    while (end > 0 && turns[end - 1]?.role === 'assistant') end--
+    if (end === 0) {
+      throw new LLMError(`Nothing to answer: ${model} needs the conversation to end with a user turn`)
+    }
+    if (end < turns.length) {
+      logger.warn({ model, dropped: turns.length - end }, 'Dropped trailing assistant turns: this model rejects assistant prefill')
+    }
+    return turns.slice(0, end)
+  }
+
+  async countInputTokens(request: ProviderRequest): Promise<number> {
+    const system = request.messages.filter(m => m.role === 'system').flatMap(m =>
+      typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content)
+    const params = {
+      model: request.model,
+      system: system.length ? system : undefined,
+      messages: this.conversation(request.model, request.messages),
+      tools: request.tools?.length ? request.tools : undefined,
+      thinking: anthropicModelRules(request.model).thinking,
+    }
+    const count = await this.client.beta.messages.countTokens(
+      params as unknown as Parameters<typeof this.client.beta.messages.countTokens>[0]
+    )
+    return count.input_tokens
   }
 
   async complete(request: ProviderRequest): Promise<LLMCompletion> {
@@ -56,7 +92,8 @@ export class AnthropicProvider implements LLMProvider {
         }
       }
 
-      const nonSystemMessages = request.messages.filter((m) => m.role !== 'system')
+      const nonSystemMessages = this.conversation(request.model, request.messages)
+      const rules = anthropicModelRules(request.model)
 
       // Build request params (some models don't support both temperature and top_p)
       const params: Record<string, unknown> = {
@@ -67,9 +104,14 @@ export class AnthropicProvider implements LLMProvider {
         stop_sequences: request.stop_sequences,
       }
 
-      // Only include temperature (not top_p) to avoid API errors with newer models
-      if (request.temperature !== undefined) {
-        params.temperature = request.temperature
+      // Only include temperature (not top_p) to avoid API errors with newer models.
+      // Models that accept only the default sampling get no temperature at all.
+      const temperature = rules.samplingParams ? request.temperature : undefined
+      if (temperature !== undefined) {
+        params.temperature = temperature
+      }
+      if (rules.thinking) {
+        params.thinking = rules.thinking
       }
 
       // Add tools if provided
@@ -98,19 +140,26 @@ export class AnthropicProvider implements LLMProvider {
       }, 'Received Anthropic response')
 
       // Parse response
-      const content: ContentBlock[] = response.content.map((block) => {
+      const content: ContentBlock[] = response.content.flatMap((block): ContentBlock[] => {
         if (block.type === 'text') {
-          return { type: 'text' as const, text: block.text }
+          return [{ type: 'text' as const, text: block.text }]
         } else if (block.type === 'tool_use') {
-          return {
+          return [{
             type: 'tool_use' as const,
             id: block.id,
             name: block.name,
             input: block.input as Record<string, unknown>,
-          }
+          }]
+        }
+        // Reasoning blocks are never part of the reply (the pinned SDK predates their
+        // types, hence the cast). Claude Haiku 5.5 runs with thinking off, so they only
+        // arrive from a model configured without that rule.
+        const type = (block as { type: string }).type
+        if (type === 'thinking' || type === 'redacted_thinking') {
+          return []
         }
         // Unknown block type, return as text
-        return { type: 'text' as const, text: JSON.stringify(block) }
+        return [{ type: 'text' as const, text: JSON.stringify(block) }]
       })
 
       // Calculate text length for trace
@@ -128,7 +177,7 @@ export class AnthropicProvider implements LLMProvider {
             systemPromptLength: Array.isArray(systemParam) ? systemParam.length : (systemParam?.length || 0),
             hasTools: !!(request.tools && request.tools.length > 0),
             toolCount: request.tools?.length || 0,
-            temperature: request.temperature,
+            temperature,
             maxTokens: request.max_tokens,
             stopSequences: request.stop_sequences,
             apiBaseUrl: 'https://api.anthropic.com',
@@ -179,7 +228,7 @@ export class AnthropicProvider implements LLMProvider {
             systemPromptLength: Array.isArray(systemParam) ? systemParam.length : (systemParam?.length || 0),
             hasTools: !!(request.tools && request.tools.length > 0),
             toolCount: request.tools?.length || 0,
-            temperature: request.temperature,
+            temperature,
             maxTokens: request.max_tokens,
             stopSequences: request.stop_sequences,
             apiBaseUrl: 'https://api.anthropic.com',

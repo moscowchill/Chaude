@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "overview": "This community follows the DigitalGuards/MyQRLWallet ecosystem, QRL post-quantum development and ecdsa.fail circuit research. MyQRLWallet covers web, mobile, desktop and browser-extension wallets. QRL Connect pairs dApps with wallets; ZondScan explores the chain; QuantaPool develops native pooled staking; QuantaSwap develops cross-chain swaps; QNS provides naming; QuantaStark researches validity proofs; Qnero experiments with shielded transfers on its own chain. QRL legacy uses stateful XMSS; QRL 2.0 develops ML-DSA-87 smart-contract accounts. ML-KEM handles key encapsulation, ML-DSA handles signatures, and neither automatically provides transaction privacy. ecdsa.fail improves simulated quantum circuits relevant to ECDSA resource estimates. Keep research, testnet, released source and live production claims separate and date changing facts. Public project guides supply the background; routine Git notifications are excluded.",
+  "topics": [
+    {
+      "id": "qrl",
+      "title": "QRL: legacy chain and QRL 2.0",
+      "aliases": ["qrl", "zond", "xmss", "ots", "mldsa", "ml-dsa", "qip-55", "qip55", "address"],
+      "reviewed": "2026-10-01",
+      "content": "QRL means Quantum Resistant Ledger. Its legacy blockchain uses XMSS, a stateful hash-based signature scheme. Tracking one-time-signature indices correctly is essential: reusing an OTS key compromises its security. QRL 2.0, also called Zond, is the smart-contract and proof-of-stake development line using ML-DSA-87 signatures. Keep legacy QRL mainnet, earlier Zond testnets, and the MyQRLWallet v3 test network distinct. Current MyQRLWallet v3 integrations use QIP-55 accounts: uppercase Q followed by 128 hexadecimal characters (64 bytes). An older Q plus 40-hex account belongs to an earlier address format. Importing the same seed into a different network/version does not transfer balances. Check the selected network and current release documentation before giving address, migration or availability guidance.",
+      "sources": [
+        "https://www.theqrl.org/",
+        "https://docs.theqrl.org/",
+        "https://github.com/DigitalGuards/myqrlwallet-connect/blob/main/README.md",
+        "https://csrc.nist.gov/pubs/sp/800/208/final"
+      ]
+    },
+    {
+      "id": "post-quantum",
+      "title": "Post-quantum cryptography and quantum risk",
+      "aliases": [
+        "post quantum",
+        "post-quantum",
+        "quantum",
+        "shor",
+        "grover",
+        "cryptography",
+        "ml-kem",
+        "dilithium",
+        "kyber",
+        "nist",
+        "ecdsa",
+        "xmss"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "Post-quantum cryptography runs on ordinary computers and aims to resist both classical and quantum attacks. ML-DSA (FIPS 204, derived from Dilithium) provides digital signatures; ML-KEM (FIPS 203, derived from Kyber) establishes shared secrets for encryption. AES-GCM encrypts and authenticates application data. XMSS is a stateful hash-based signature construction; it needs careful state management. Shor's algorithm threatens elliptic-curve discrete logarithms and therefore ECDSA on a sufficiently capable fault-tolerant quantum computer. Grover's algorithm concerns search and has different implications for symmetric primitives. Resource estimates depend on logical gates/qubits, error correction, physical error rates, connectivity and execution time. A logical-circuit benchmark alone cannot establish a physical attack date or prove that real-world keys were recovered. Post-quantum signatures also do not provide transaction privacy, protect compromised endpoints, or remove smart-contract risk.",
+      "sources": [
+        "https://csrc.nist.gov/pubs/fips/203/final",
+        "https://csrc.nist.gov/pubs/fips/204/final",
+        "https://csrc.nist.gov/pubs/sp/800/208/final",
+        "https://github.com/Layr-Labs/ecdsafail-challenge"
+      ]
+    },
+    {
+      "id": "wallets",
+      "title": "MyQRLWallet wallet family",
+      "aliases": [
+        "myqrlwallet",
+        "myqrwallet",
+        "mqw",
+        "wallet",
+        "mobile",
+        "app",
+        "desktop",
+        "extension",
+        "biometric"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "MyQRLWallet is a community ecosystem developed under DigitalGuards. The web wallet at qrlwallet.com provides QRL 2.0 account creation/import, transfers, tokens, NFTs and dApp connections. Its companion products include an Expo/React Native mobile app, an Electron desktop wallet, and a Chromium browser extension. The mobile app adds device authentication, QR scanning and secure device storage. Packaging and bridge details vary by release; its older README describes hosted WebView behavior and should be checked against current source before explaining a newer build. Desktop bundles the web renderer and isolates key operations in a signer process. The extension is an injected wallet option for browser dApps. Keep each platform's signing/storage boundary distinct. Verify current downloads and release status on the relevant repository. Recovery phrases, seeds and private keys stay with the user and must never be requested in Discord.",
+      "sources": [
+        "https://qrlwallet.com/",
+        "https://github.com/DigitalGuards/myqrlwallet-app",
+        "https://github.com/DigitalGuards/myqrlwallet-desktop",
+        "https://github.com/DigitalGuards/myqrlwallet-extension"
+      ]
+    },
+    {
+      "id": "connect",
+      "title": "QRL Connect SDK and wallet pairing",
+      "aliases": [
+        "connect",
+        "qrlconnect",
+        "dapp",
+        "sdk",
+        "qr code",
+        "pqp3",
+        "relay",
+        "pairing",
+        "ml-kem"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "@qrlwallet/connect is the dApp SDK for pairing with MyQRLWallet through QR codes and qrlconnect:// deep links, requesting accounts and asking the wallet to approve signing or transactions. The companion @qrlwallet/connect-ui package supplies a pairing dialog. Connect v5 uses complete QIP-55 64-byte accounts; check network and wallet compatibility when migrating older integrations. Application traffic uses ML-KEM-768 and AES-256-GCM. PQP3 includes a fresh pairing capability in the QR/deep link; the relay does not receive that capability or application plaintext. Pairing data is sensitive and should not be shared publicly. Wallet approval remains necessary for signing. Current documentation disables wallet typed-data requests pending a versioned 64-byte encoding. Follow the SDK API reference for exact methods and supported versions.",
+      "sources": [
+        "https://github.com/DigitalGuards/myqrlwallet-connect/blob/main/README.md",
+        "https://github.com/DigitalGuards/myqrlwallet-connect/tree/main/ui"
+      ]
+    },
+    {
+      "id": "zondscan",
+      "title": "ZondScan explorer",
+      "aliases": ["zondscan", "explorer", "block", "transaction", "faucet"],
+      "reviewed": "2026-10-01",
+      "content": "ZondScan is the ecosystem's QRL proof-of-stake block explorer at zondscan.com. It provides a way to inspect blockchain activity, addresses and transactions, and hosts a QRL Connect example dApp at /dapp-example. Its public source separates a Next.js frontend, a Go API and a blockchain-to-database synchronizer. Explorer indexing and node consensus are different layers: a missing or delayed explorer record does not by itself determine transaction finality. Check the correct network, transaction hash and current chain state when helping someone investigate a transfer.",
+      "sources": [
+        "https://zondscan.com/",
+        "https://github.com/DigitalGuards/zondscan",
+        "https://zondscan.com/dapp-example"
+      ]
+    },
+    {
+      "id": "quantapool",
+      "title": "QuantaPool native pooled staking",
+      "aliases": ["quantapool", "staking", "pool", "stqrl", "validator", "withdrawal", "reward"],
+      "reviewed": "2026-10-01",
+      "content": "QuantaPool's current development design is native-QRL pooled staking. Deposits, principal, gains/losses, pending withdrawals and reserved claims are accounted for on chain. Users deposit and claim QRL directly; stake units are internal and nontransferable. Historical stQRL/liquid-staking descriptions refer to an earlier design. The current dev README describes immutable contracts, a 10% operator fee on eligible realized consensus gains, and explicit operator/trust assumptions. Review and launch gates remain documented. Source implementation and local lifecycle tests are separate evidence from a publicly available production deployment. Verify current status before directing users to deposit, and never promise a fixed return, principal protection or a withdrawal deadline.",
+      "sources": [
+        "https://github.com/DigitalGuards/QuantaPool/blob/dev/README.md",
+        "https://github.com/DigitalGuards/QuantaPool/blob/dev/native/FINAL-SECURITY-REVIEW.md",
+        "https://quantapool.com/"
+      ]
+    },
+    {
+      "id": "quantaswap",
+      "title": "QuantaSwap cross-chain swaps",
+      "aliases": [
+        "quantaswap",
+        "swap",
+        "htlc",
+        "ethereum",
+        "sepolia",
+        "weth",
+        "usdc",
+        "usdt",
+        "orderbook",
+        "order book",
+        "solver"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "QuantaSwap uses hashed timelock contracts (HTLCs) for self-custodial swaps between QRL and Ethereum-side assets. A shared secret and ordered deadlines coordinate claims; timeout refund paths handle an unfinished swap. Protocol mode discovers counterparties through an order book. The solver design has additional counterparty and attestation assumptions. Current development includes signed, portable order discovery with ML-DSA-87; the funded HTLC state determines settlement. Check the selected chains, supported assets, amounts, recipients, timelocks and contract state. A post-quantum QRL leg does not remove the cryptographic or contract risks of the other chain. Verify current network and deployment status at the app and public documentation before describing real-money availability.",
+      "sources": [
+        "https://quantaswap.io/",
+        "https://github.com/DigitalGuards/QuantaSwap/blob/dev/README.md",
+        "https://github.com/DigitalGuards/QuantaSwap/blob/dev/docs/ARCHITECTURE.md"
+      ]
+    },
+    {
+      "id": "qns",
+      "title": "QNS naming and Hyperion contracts",
+      "aliases": [
+        "qns",
+        "name service",
+        ".qrl",
+        "ens",
+        "hyperion",
+        "qrvm",
+        "contract",
+        "qrc20",
+        "qrc721"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "QNS is the QRL Name Service, a Hyperion-native naming project for QRL 2.0. It follows the ENS registry model while using native 64-byte QRL addresses. Forward/reverse records and their normalization must use the correct network and encoding. Its public documentation describes active migration work, SHAKE256 and ML-DSA-87 signing groundwork, and remaining wallet/deployment gates. QRL 2.0's QRVM and Hyperion toolchain have native address/ABI differences from Ethereum; ordinary Solidity/EVM assumptions need review before porting a contract. The broader ecosystem also includes QRC20 token tooling. Verify current registries, methods and deployed addresses from public project documentation before recommending a registration or transaction.",
+      "sources": [
+        "https://github.com/DigitalGuards/myqrlwallet-qns/blob/main/README.md",
+        "https://github.com/DigitalGuards/QRC20-Factory"
+      ]
+    },
+    {
+      "id": "quantastark",
+      "title": "QuantaStark validity-proof research",
+      "aliases": [
+        "quantastark",
+        "quantaproof",
+        "stark",
+        "plonky3",
+        "rollup",
+        "l2",
+        "validity",
+        "zero knowledge"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "QuantaStark, formerly referenced as QuantaProof, is a DigitalGuards research project for post-quantum STARK verification on QRL 2.0. The repository includes a Hyperion verifier, Rust prover, test vectors, a fact registry and a bridge skeleton informing an L2 design. Current proofs demonstrate validity for scaling. The current implementation does not provide zero knowledge or transaction privacy. It is experimental and unaudited, with breaking changes possible. Consult its security-status document for the exact proof and deployment boundary; a working verifier or benchmark does not establish production readiness or the security of a complete rollup.",
+      "sources": [
+        "https://github.com/DigitalGuards/QuantaStark/blob/dev/README.md",
+        "https://github.com/DigitalGuards/QuantaStark/blob/dev/docs/SECURITY-STATUS.md"
+      ]
+    },
+    {
+      "id": "qnero",
+      "title": "Qnero, Qloak and silQ Road",
+      "aliases": ["qnero", "qloak", "silq", "qnr", "privacy", "monero", "shielded"],
+      "reviewed": "2026-10-01",
+      "content": "Qnero is a separate experimental privacy-chain project in the community ecosystem. Its design uses shielded user transfers, hash-based proof machinery and lattice cryptography, with proof-of-work emission. Qloak is its browser wallet and silQ Road its explorer. The public project describes a pre-alpha testnet, resettable test coins with no value, and no independent audit of its own code. Its proof profile and overall classical/quantum security need separate qualification. Transaction privacy, network metadata privacy and quantum resistance are distinct claims; avoid promising complete anonymity. QNR and QRL are different assets/networks. Use current documentation for the testnet state and crypto profile.",
+      "sources": [
+        "https://qnero.io/",
+        "https://github.com/DigitalGuards/qnero/blob/main/README.md",
+        "https://github.com/DigitalGuards/qnero/blob/main/docs/CRYPTOGRAPHY.md"
+      ]
+    },
+    {
+      "id": "ecdsa-fail",
+      "title": "ecdsa.fail quantum circuit research",
+      "aliases": [
+        "ecdsa.fail",
+        "ecdsafail",
+        "ecdsa fail",
+        "secp256k1",
+        "toffoli",
+        "qubit",
+        "point addition",
+        "benchmark",
+        "frontier",
+        "yukon",
+        "eigen"
+      ],
+      "reviewed": "2026-10-01",
+      "content": "ecdsa.fail is an Eigen Labs research challenge for reducing reversible quantum-circuit resources relevant to breaking elliptic-curve cryptography. Its secp256k1 point-addition benchmark implements one component used repeatedly within Shor's discrete-logarithm algorithm. The objective is average executed Toffoli count multiplied by peak live qubits, with lower scores preferred. The harness checks 9,024 inputs derived from the circuit operation stream, along with classical correctness, clean ancillas, phase cleanliness and reversal. Circuit changes require fresh validation against the current harness and frontier. A successful simulated circuit optimization is resource-estimation research; it does not mean someone has recovered a Bitcoin or Ethereum key on quantum hardware. Frontier scores, rules and leaderboard positions change: look them up before quoting a current winner or result. See the challenge source and the public site, which also links newer Yukon research challenges.",
+      "sources": [
+        "https://ecdsa.fail/",
+        "https://github.com/Layr-Labs/ecdsafail-challenge/blob/main/README.md",
+        "https://yukon.org/"
+      ]
+    }
+  ]
+}

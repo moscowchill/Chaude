@@ -91,9 +91,9 @@ export class ToolSystem {
 
   /**
    * Call onPostActivation hooks for all loaded plugins.
-   * Runs in background - does not await. Errors are logged but don't propagate.
+   * Completes inside the activation trace. Errors are logged and isolated per plugin.
    */
-  firePostActivationHooks(result: ActivationResult): void {
+  async firePostActivationHooks(result: ActivationResult): Promise<void> {
     const factory = this.pluginContextFactory as {
       createStateContext: (
         pluginId: string,
@@ -124,11 +124,11 @@ export class ToolSystem {
 
     for (const [pluginName, plugin] of this.loadedPluginObjects) {
       if (plugin.onPostActivation) {
-        // Run in background - don't await
+        // Await each hook before advancing the shared plugin context.
         const pluginConfig = this.pluginConfigs[pluginName]
         const context = factory.createStateContext(pluginName, baseContext, undefined, undefined, pluginConfig)
 
-        plugin.onPostActivation(context, result)
+        await plugin.onPostActivation(context, result)
           .then(() => {
             logger.debug({ pluginName }, 'Post-activation hook completed')
           })

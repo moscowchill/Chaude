@@ -7,6 +7,7 @@ import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'dis
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
+import { createRequire } from 'node:module'
 import sharp from 'sharp'
 import { EventQueue } from '../agent/event-queue.js'
 import {
@@ -18,11 +19,16 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
+import { installControls, type ControlsOptions } from './controls.js'
+import { canImportHistory, historyAuthor } from './history-access.js'
+import { WelcomeService, type WelcomeConfig } from './welcome.js'
 
 export interface ConnectorOptions {
   token: string
   cacheDir: string
   maxBackoffMs: number
+  welcome?: WelcomeConfig
+  ignoreWebhooks?: boolean
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 500_000  // ~500 KB raw text (summarizer handles oversized docs)
@@ -33,14 +39,16 @@ const MAX_PDF_PAGES_FULL = 10  // PDFs over this get a "too long" warning
 // Dynamic import for pdf-parse (optional dependency)
 // Using v1.x API which is more stable in Node.js
 type PdfParseResult = { text: string; numPages: number }
-type PdfParseFn = (buffer: Buffer) => Promise<{ text: string; numpages: number }>
+type PdfParseFn = (buffer: Uint8Array) => Promise<{ text: string; numpages: number }>
 let pdfParseFn: PdfParseFn | null | undefined = null
 
 async function loadPdfParse(): Promise<PdfParseFn | null> {
   if (pdfParseFn === null) {
     try {
-      const module = await import('pdf-parse')
-      pdfParseFn = module.default as PdfParseFn
+      // createRequire avoids pdf-parse's standalone debug branch under Node 22 ESM.
+      const module: unknown = createRequire(import.meta.url)('pdf-parse')
+      // The bundled pdf.js accepts Uint8Array; upstream typings only declare Buffer.
+      pdfParseFn = module as PdfParseFn
     } catch {
       pdfParseFn = undefined
     }
@@ -54,7 +62,8 @@ async function parsePdf(buffer: Buffer): Promise<PdfParseResult> {
     throw new Error('PDF support not available')
   }
 
-  const result = await parse(buffer)
+  // pdf.js expects slice() to copy; Node Buffer.slice() returns a view.
+  const result = await parse(new Uint8Array(buffer))
   return {
     text: result.text,
     numPages: result.numpages,
@@ -74,8 +83,13 @@ export interface FetchContextParams {
 
 export class DiscordConnector {
   private client: Client
+  private welcomeService?: WelcomeService
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
+  async installControls(options: ControlsOptions): Promise<void> {
+    await installControls(this.client, options)
+  }
+
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
 
@@ -84,13 +98,32 @@ export class DiscordConnector {
     private options: ConnectorOptions
   ) {
     this.client = new Client({
+      allowedMentions: { parse: ['users'], repliedUser: false },
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
+        ...(options.welcome ? [GatewayIntentBits.GuildMembers] : []),
       ],
     })
+
+    if (options.welcome) {
+      this.welcomeService = new WelcomeService(options.welcome, async (message) => {
+        await retryDiscord(async () => {
+          const channel = await this.client.channels.fetch(message.channelId)
+          if (!(channel instanceof TextChannel) || channel.guildId !== message.guildId) {
+            throw new DiscordError('Welcome channel must be a text channel in the configured server')
+          }
+          await channel.send({
+            content: message.content,
+            allowedMentions: { parse: [], users: [message.userId], repliedUser: false },
+            nonce: message.nonce,
+            enforceNonce: true,
+          })
+        }, this.options.maxBackoffMs)
+      })
+    }
 
     this.setupEventHandlers()
 
@@ -276,7 +309,8 @@ export class DiscordConnector {
             undefined,
             Math.max(0, depth - messages.length),  // Remaining message budget
             authorized_roles,
-            ignoreHistory
+            ignoreHistory,
+            channel
           )
           
           logger.debug({
@@ -364,6 +398,7 @@ export class DiscordConnector {
 
       startProfile('messageConvert')
       // Convert to our format (with reply username lookup)
+      if (this.options.ignoreWebhooks) messages = messages.filter(message => !message.webhookId)
       const messageMap = new Map(messages.map(m => [m.id, m]))
       const discordMessages: DiscordMessage[] = messages.map((msg) => this.convertMessage(msg, messageMap))
       endProfile('messageConvert')
@@ -545,8 +580,13 @@ export class DiscordConnector {
     stopAtId: string | undefined,
     maxMessages: number,
     authorizedRoles?: string[],
-    ignoreHistory?: boolean
+    ignoreHistory?: boolean,
+    destination: TextChannel = channel,
+    visited: Set<string> = new Set()
   ): Promise<Message[]> {
+    const key = `${channel.id}:${startFromId || 'latest'}`
+    if (visited.size >= 5 || visited.has(key)) return []
+    visited.add(key)
     const results: Message[] = []
     let currentBefore = startFromId
     const batchSize = 100
@@ -632,19 +672,8 @@ export class DiscordConnector {
         if (message.content?.startsWith('.history') && !ignoreHistory) {
           logger.debug({ messageId: message.id, content: message.content }, 'Found .history command during traversal')
 
-          // Check authorization
-          let authorized = true
-          if (authorizedRoles && authorizedRoles.length > 0) {
-            const member = message.member
-            if (member) {
-              const memberRoles = member.roles.cache.map((r) => r.name)
-              authorized = authorizedRoles.some((role: string) => memberRoles.includes(role))
-            } else {
-              authorized = false
-            }
-          }
-
-          if (authorized) {
+          const member = await historyAuthor(message, authorizedRoles || [])
+          if (member && canImportHistory(member, channel, destination)) {
             const historyRange = this.parseHistoryCommand(message.content)
             
             logger.debug({ 
@@ -691,7 +720,7 @@ export class DiscordConnector {
                 ? await this.client.channels.fetch(targetChannelId) as TextChannel
                 : channel
 
-              if (targetChannel && targetChannel.isTextBased()) {
+              if (targetChannel && targetChannel.isTextBased() && canImportHistory(member, targetChannel, destination)) {
                 const histLastId = this.extractMessageIdFromUrl(historyRange.last) || undefined
                 const histFirstId = historyRange.first ? (this.extractMessageIdFromUrl(historyRange.first) || undefined) : undefined
 
@@ -715,7 +744,9 @@ export class DiscordConnector {
                   histFirstId,     // Start point (stop when reached, or undefined)
                   maxMessages - results.length - batchResults.length,  // Account for current batch
                   authorizedRoles,
-                  ignoreHistory    // Pass through (though this path only runs when ignoreHistory is false)
+                  ignoreHistory,
+                  destination,
+                  visited
                 )
 
                 logger.debug({ 
@@ -757,7 +788,7 @@ export class DiscordConnector {
 
           // This should never be reached if .history was processed above
           // Skip the .history command itself if somehow we get here
-          logger.warn({ messageId: message.id }, 'Unexpected: reached .history skip without processing')
+          logger.debug({ messageId: message.id }, 'Ignored unauthorized or invalid .history command')
           continue
         }
 
@@ -1462,6 +1493,32 @@ export class DiscordConnector {
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
+      if (this.options.welcome) {
+        logger.info({ guildId: this.options.welcome.guildId, channelId: this.options.welcome.channelId }, 'Automatic member welcomes enabled')
+      }
+    })
+
+    this.client.on('guildMemberAdd', (member) => {
+      void this.welcomeService?.welcome({
+        guildId: member.guild.id,
+        userId: member.id,
+        isBot: member.user.bot,
+        pending: member.pending,
+        joinedTimestamp: member.joinedTimestamp,
+      })
+    })
+
+    // Membership screening can delay a new member's admission.
+    this.client.on('guildMemberUpdate', (previous, member) => {
+      if (previous.pending && !member.pending) {
+        void this.welcomeService?.welcome({
+          guildId: member.guild.id,
+          userId: member.id,
+          isBot: member.user.bot,
+          pending: member.pending,
+          joinedTimestamp: member.joinedTimestamp,
+        })
+      }
     })
 
     this.client.on('messageCreate', (message) => {
@@ -1988,4 +2045,3 @@ export class DiscordConnector {
     return chunks
   }
 }
-

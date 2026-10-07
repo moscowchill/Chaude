@@ -380,6 +380,26 @@ git ls-remote https://github.com/antra-tess/membrane.git refs/heads/main | cut -
 - Discord bot token (`DISCORD_TOKEN` in `.env`)
 - LLM API keys (`ANTHROPIC_API_KEY`, etc. in `.env`)
 
+## Automatic welcomes
+
+Set `WELCOME_GUILD_ID` and `WELCOME_CHANNEL_ID` in `.env`, then enable Server Members Intent in the Discord developer portal. The bot welcomes human members in that channel after any membership screening completes. It requires View Channel and Send Messages permissions.
+
+`WELCOME_MESSAGE` optionally overrides the greeting; `{user}` becomes the new member's mention. Welcomes use a fixed message without an LLM call. Duplicate events are suppressed using persisted state in the cache directory and a Discord message nonce. A later rejoin can receive another welcome. Keep the cache directory across restarts.
+
+## Tool access
+
+- Uploaded text and PDF attachments are processed directly from Discord. This works with the `read-file` plugin disabled.
+- `read_file` denies access by default. Operators may set `READ_FILE_ALLOWED_DIRS` to explicit absolute directories containing curated, non-secret documents, separated by the platform path separator. Paths outside these directories, including symlink escapes, are rejected.
+- `web_fetch` accepts public HTTP(S) pages on their default ports. It checks DNS results and each redirect, pins connections to checked addresses, and limits downloads to 2 MiB. Private, loopback, link-local, and reserved destinations are blocked.
+- Pinned channel configuration cannot grant plugins, launch MCP servers, or select local prompt files. Set those capabilities in the host configuration.
+- Bot messages suppress everyone and role notifications. Welcomes can notify only the joining member.
+
+### Optional Linux filesystem sandbox
+
+After building, `bash scripts/sandbox.sh` starts the bot using bubblewrap. The launcher exposes code, dependencies, configuration, and `.env` as read-only inputs; only `cache`, `logs`, and `tools` persist writes. It uses the default application paths and loads bot settings from `.env`. Other home directories and host processes are hidden.
+
+Install bubblewrap through your operating system. `NODE_BINARY` can select a Node executable, and `SANDBOX_APPARMOR_PROFILE` can select an administrator-created profile on hosts that restrict user namespaces. The launcher fails if the sandbox cannot be established. Network access remains available for Discord, model providers, and public web pages; the web-fetch tool enforces its own destination policy.
+
 ## REST API
 
 If enabled with `API_BEARER_TOKEN`, the bot exposes a REST API for accessing Discord conversation history.
@@ -427,3 +447,89 @@ Chaude is developed to be compatible and interoperable with the [chapter2](https
 
 MIT
 
+## Curated knowledge and spending controls
+
+The optional community guide in `config/knowledge/myqrlwallet.json` covers
+MyQRLWallet, QRL/post-quantum cryptography and ecdsa.fail. Topics have sources,
+review dates and search aliases. The operator reviews and edits this file;
+chat users and model tools cannot rewrite it. It is loaded at startup. Relevant
+topics are selected locally, without an embedding service or a model call.
+For changing facts, the bot is instructed to check current primary sources.
+
+Configure through the host environment:
+
+```dotenv
+KNOWLEDGE_FILE=./config/knowledge/myqrlwallet.json
+DAILY_BUDGET_USD=2
+IGNORE_WEBHOOK_MESSAGES=true
+CONTROL_GUILD_IDS=<guild-id>
+USER_COOLDOWN_MS=10000
+CHANNEL_COOLDOWN_MS=5000
+```
+
+`IGNORE_WEBHOOK_MESSAGES` removes webhook posts from conversational context,
+attachment processing and subsequent memory work. No Git-history import runs.
+Cool-downs pace accepted activations without discarding their trigger.
+Activations and administrative note edits run serially, and post-response
+memory work finishes before its trace is saved. Slow background work can delay
+the next response. State writes use atomic replacement and retain one previous
+snapshot in a `.previous` file for operator recovery.
+
+### Discord commands
+
+Commands register only in `CONTROL_GUILD_IDS` (comma-separated server IDs),
+without replacing unrelated commands. Replies are visible only to the requester.
+
+- `/status`: default model, accounted/reserved daily spending, knowledge coverage
+  and the last model failure since startup.
+- `/knowledge [topic]`: inspect the guide, review dates and primary sources.
+- `/memory [id] [page]`: inspect saved conversation notes in the current channel.
+- `/forget id:<note-id>`: remove an active channel note. Requires current
+  **Manage Messages** permission. Curated knowledge is maintained separately.
+
+These memory commands address channel-scoped notes. Removal clears the
+consolidation restore copy; historical traces and operator recovery snapshots
+retain their own retention policies. The command edits active memory only.
+
+### Budget accounting
+
+The daily limit covers every managed model generation, including note
+consolidation, document summaries, selection and tool continuations. Days reset
+at 00:00 UTC. Reservations are saved in `cache/spending.json` before a paid call
+and survive restarts. Keep that directory persistent and use one bot process per
+ledger. The ledger starts accounting when enabled; it is independent of any
+other software using the API account.
+
+The metered route currently supports direct Anthropic models with verified
+pricing and token counting. The counter reserves input with padding, the
+highest input/cache price, and maximum output. Successful calls settle against
+reported usage; cache writes use the conservative one-hour rate. Ambiguous
+failures and missing usage keep their reservation. Explicit rejected requests
+release it. These conservative totals can exceed the provider's eventual bill.
+They exclude taxes and external services such as Brave Search.
+
+Unsupported models and membrane/shadow routes fail closed while budgeting is
+enabled. Add verified model rates through host-only `LLM_PRICING_JSON`, an object
+mapping exact model IDs to `input`, `output`, `cacheWrite` and `cacheRead` prices
+in USD per million tokens. Check [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing)
+before changing models. Auth, billing and validation failures are surfaced
+immediately; transient failures have bounded retries and respect Retry-After.
+
+### History controls
+
+`.history` requires current **Manage Messages** permission or an ID in the
+host's `authorized_roles` list. Role names are no longer accepted. Bot/webhook
+control messages are ignored. Same-channel history is supported; cross-channel
+imports require a source visible with history access to everyone in the same
+guild, without member/role read denies. Private threads and cross-guild imports
+are rejected. Traversal is bounded and detects repeated locations.
+
+### Model upgrade checks
+
+`npm run eval:knowledge` previews eight questions and review criteria without
+calling an API. For a deliberate comparison, stop the bot using that ledger and
+run `npm run eval:knowledge -- --run --model <model-id>` with the configured
+credentials, guide and daily limit in the environment. Each result records the
+answer, latency, token usage and budget totals. Review source use, uncertainty,
+crypto distinctions and resistance to injected instructions before changing the
+live model. The runner sends no Discord messages.

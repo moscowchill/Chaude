@@ -91,11 +91,8 @@ export class TraceCollector {
   private logs: LogEntry[] = []
   
   // For tracking current LLM call (used by provider)
-  private currentLLMCall?: {
-    callId: string
-    depth: number
-    startedAt: Date
-  }
+  private nextLLMCall = 0
+  private activeLLMCalls = new Map<string, { callId: string; depth: number; startedAt: Date }>()
   
   constructor(channelId: string, triggeringMessageId: string, botId: string) {
     this.traceId = randomUUID().slice(0, 8)  // Short ID for readability
@@ -213,12 +210,12 @@ export class TraceCollector {
    * Start tracking an LLM call
    */
   startLLMCall(depth: number): string {
-    const callId = `${this.traceId}-llm-${this.llmCalls.length}`
-    this.currentLLMCall = {
+    const callId = `${this.traceId}-llm-${this.nextLLMCall++}`
+    this.activeLLMCalls.set(callId, {
       callId,
       depth,
       startedAt: new Date(),
-    }
+    })
     return callId
   }
   
@@ -237,16 +234,17 @@ export class TraceCollector {
       error?: LLMCallInfo['error']
     }
   ): void {
-    if (!this.currentLLMCall || this.currentLLMCall.callId !== callId) {
+    const active = this.activeLLMCalls.get(callId)
+    if (!active) {
       console.warn(`LLM call ${callId} not found in current trace`)
       return
     }
     
     const call: LLMCallInfo = {
       callId,
-      depth: this.currentLLMCall.depth,
-      startedAt: this.currentLLMCall.startedAt,
-      durationMs: Date.now() - this.currentLLMCall.startedAt.getTime(),
+      depth: active.depth,
+      startedAt: active.startedAt,
+      durationMs: Date.now() - active.startedAt.getTime(),
       model,
       request,
       response,
@@ -257,7 +255,7 @@ export class TraceCollector {
     }
     
     this.llmCalls.push(call)
-    this.currentLLMCall = undefined
+    this.activeLLMCalls.delete(callId)
   }
   
   /**
@@ -272,15 +270,16 @@ export class TraceCollector {
       request?: LLMCallInfo['request']
     }
   ): void {
-    if (!this.currentLLMCall || this.currentLLMCall.callId !== callId) {
+    const active = this.activeLLMCalls.get(callId)
+    if (!active) {
       return
     }
     
     const call: LLMCallInfo = {
       callId,
-      depth: this.currentLLMCall.depth,
-      startedAt: this.currentLLMCall.startedAt,
-      durationMs: Date.now() - this.currentLLMCall.startedAt.getTime(),
+      depth: active.depth,
+      startedAt: active.startedAt,
+      durationMs: Date.now() - active.startedAt.getTime(),
       model: options?.model || 'unknown',
       request: options?.request || {
         messageCount: 0,
@@ -303,11 +302,11 @@ export class TraceCollector {
     }
     
     this.llmCalls.push(call)
-    this.currentLLMCall = undefined
+    this.activeLLMCalls.delete(callId)
   }
   
   getCurrentLLMCallId(): string | undefined {
-    return this.currentLLMCall?.callId
+    return [...this.activeLLMCalls.keys()].at(-1)
   }
   
   // ──────────────────────────────────────────────────────────────────────────

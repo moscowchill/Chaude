@@ -12,6 +12,10 @@ import { LLMMiddleware, ProviderMessage } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, CachedDocument, DiscordMessage, ToolCall, ToolResult, LLMRequest, LLMCompletion, ContentBlock } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
+import { KnowledgeBase } from '../knowledge/base.js'
+import { BudgetError } from '../llm/budget.js'
+import { ActivationCooldown } from '../utils/cooldown.js'
+import { memoryQueue } from '../utils/atomic-state.js'
 import { sleep } from '../utils/retry.js'
 import { 
   withTrace, 
@@ -43,6 +47,7 @@ interface ContentSegment {
 }
 
 export class AgentLoop {
+  private cooldown = new ActivationCooldown(Number(process.env.USER_COOLDOWN_MS || '0'), Number(process.env.CHANNEL_COOLDOWN_MS || '0'))
   private running = false
   private botUserId?: string
   private botMessageIds = new Set<string>()  // Track bot's own message IDs
@@ -72,7 +77,8 @@ export class AgentLoop {
     private contextBuilder: ContextBuilder,
     private llmMiddleware: LLMMiddleware,
     private toolSystem: ToolSystem,
-    cacheDir: string = './cache'
+    cacheDir: string = './cache',
+    private knowledge?: KnowledgeBase
   ) {
     this.activationStore = new ActivationStore(cacheDir)
     this.cacheDir = cacheDir
@@ -123,7 +129,8 @@ export class AgentLoop {
             }
           }
           for (const group of byChannel.values()) {
-            await this.processBatch(group)
+            if (!this.running) break
+            await memoryQueue.run(() => this.processBatch(group))
           }
         } else {
           // Avoid busy-waiting
@@ -411,6 +418,10 @@ export class AgentLoop {
     const triggeringEvent = this.findTriggeringMessageEvent(events)
     const triggeringMessageId = (triggeringEvent?.data as Record<string, unknown> | undefined)?.id as string | undefined
 
+    const author = (triggeringEvent?.data as { author?: { id?: string } } | undefined)?.author
+    const delay = this.cooldown.reserve(channelId, author?.id)
+    if (delay) await sleep(delay)
+
     // Check for m command and delete it
     const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as Record<string, unknown>)._isMCommand)
     if (mCommandEvent) {
@@ -435,7 +446,7 @@ export class AgentLoop {
       }
     }
 
-    // Mark channel as active and process asynchronously (don't await)
+    // Keep plugin context and memory work within this activation.
     this.activeChannels.add(channelId)
     
     // Determine activation reason for tracing
@@ -527,7 +538,7 @@ export class AgentLoop {
         })
       : this.handleActivation(channelId, guildId, triggeringMessageId)
     
-    activationPromise
+    await activationPromise
       .catch((error) => {
         logger.error({ error, channelId, guildId }, 'Failed to handle activation')
       })
@@ -845,7 +856,7 @@ export class AgentLoop {
 
         if (summary) {
           const originalChars = doc.text.length
-          const header = `[Summary of ${doc.filename} — original: ${originalChars.toLocaleString()} chars]\n\n`
+          const header = `[Summary of ${doc.filename} - original: ${originalChars.toLocaleString()} chars]\n\n`
           const summaryText = header + summary
           this.summaryCache.set(doc.url, summaryText)
           doc.text = summaryText
@@ -861,7 +872,7 @@ export class AgentLoop {
           }, 'Document summarized successfully')
         }
       } catch (error) {
-        logger.warn({ error, filename: doc.filename }, 'Failed to summarize document — using truncated version')
+        logger.warn({ error, filename: doc.filename }, 'Failed to summarize document - using truncated version')
         // Fall through with original (possibly truncated) text
       }
     }
@@ -1171,7 +1182,7 @@ export class AgentLoop {
         // This prevents the oldest message from sliding forward as new messages arrive,
         // which would otherwise invalidate the cached prompt prefix on every activation.
         firstMessageId: promptCachingEnabled ? (state.cacheOldestMessageId || undefined) : undefined,
-        authorized_roles: [],  // Will apply after loading config
+        authorized_roles: preConfig.authorized_roles || [],
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
         maxImages: maxImagesFetch,  // Prevents loading all images from image-heavy channels
       })
@@ -1474,6 +1485,7 @@ export class AgentLoop {
           channelId,
           guildId,
           currentMessageId: triggeringMessageId || '',
+          recentConversation: discordContext.messages.slice(-12).map(m => `${m.author.username}: ${m.content}`).join('\n').slice(-8000),
           config,
           sendMessage: async (content: string) => {
             return await this.connector.sendMessage(channelId, content)
@@ -1548,6 +1560,11 @@ export class AgentLoop {
       }
 
       const contextResult = await this.contextBuilder.buildContext(buildParams)
+
+      if (this.knowledge) {
+        const recent = discordContext.messages.slice(-6).map(message => message.content).join('\n')
+        contextResult.request.system_prompt = [contextResult.request.system_prompt, this.knowledge.context(recent)].filter(Boolean).join('\n\n')
+      }
 
       // Add tools if enabled
       if (config.tools_enabled) {
@@ -1821,7 +1838,7 @@ export class AgentLoop {
 
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
 
-      // Fire post-activation hooks for plugins (runs in background)
+      // Finish memory work before finalizing the activation trace.
       // Include message content for compaction plugin
       const contextMessages = discordContext.messages.map(m => ({
         id: m.id,
@@ -1830,7 +1847,7 @@ export class AgentLoop {
         timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : String(m.timestamp),
       }))
 
-      this.toolSystem.firePostActivationHooks({
+      await this.toolSystem.firePostActivationHooks({
         success: true,
         channelId,
         guildId,
@@ -1880,7 +1897,9 @@ export class AgentLoop {
 
       // Send error message
       let message: string
-      if (errorDetails.isRateLimit) {
+      if (error instanceof BudgetError) {
+        message = error.message
+      } else if (errorDetails.isRateLimit) {
         const waitTime = errorDetails.retryAfter
           ? `~${Math.ceil(errorDetails.retryAfter / 60)} min`
           : 'a moment'
@@ -1981,6 +2000,9 @@ export class AgentLoop {
    * - membrane_shadow_mode: true + use_membrane: true → run both, use membrane result
    */
   private async completeLLM(request: LLMRequest, config: BotConfig): Promise<LLMCompletion> {
+    if (this.llmMiddleware.budget && (config.use_membrane || config.membrane_shadow_mode)) {
+      throw new BudgetError('The spending limit requires the metered provider route.')
+    }
     // Shadow mode: run both paths and compare
     if (config.membrane_shadow_mode && this.membraneProvider) {
       return this.completeLLMWithShadow(request, config)

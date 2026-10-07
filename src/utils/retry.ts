@@ -15,16 +15,13 @@ export interface RetryOptions {
 /**
  * Retry a function with configurable backoff
  */
-export async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  options: RetryOptions
-): Promise<T> {
+export async function retryWithBackoff<T>(fn: () => Promise<T>, options: RetryOptions): Promise<T> {
   const {
     maxAttempts,
     initialDelay = 1000,
     maxDelay = 32000,
     exponential = true,
-    onRetry,
+    onRetry
   } = options
 
   let lastError: Error | undefined
@@ -55,7 +52,7 @@ export async function retryWithBackoff<T>(
           error: lastError.message,
           attempt,
           maxAttempts,
-          delayMs: delay,
+          delayMs: delay
         },
         'Retrying after error'
       )
@@ -77,138 +74,66 @@ export function sleep(ms: number): Promise<void> {
 /**
  * Retry for LLM calls (no exponential backoff, fixed retry count)
  */
-export async function retryLLM<T>(
-  fn: () => Promise<T>,
-  maxAttempts: number
-): Promise<T> {
+export async function retryLLM<T>(fn: () => Promise<T>, maxAttempts: number): Promise<T> {
   return retryWithBackoff(fn, {
     maxAttempts,
     initialDelay: 1000,
-    exponential: false,
+    exponential: false
   })
 }
 
-/**
- * Type guard helpers for safe property access on unknown error objects
- */
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
+/** Providers may wrap SDK failures in LLMError.details. */
+function errorDetails(error: unknown): Record<string, unknown> {
+  if (!error || typeof error !== 'object') return {}
+  const object = error as Record<string, unknown>
+  return object.details && typeof object.details === 'object'
+    ? (object.details as Record<string, unknown>)
+    : object
 }
 
-function hasProperty<K extends string>(obj: Record<string, unknown>, key: K): obj is Record<K, unknown> {
-  return key in obj
+export function llmErrorStatus(error: unknown): number | undefined {
+  const status = errorDetails(error).status
+  return typeof status === 'number' ? status : undefined
 }
 
-/**
- * Extract retry-after duration from a rate limit error.
- * Returns undefined if not a rate limit error or no retry-after header.
- * Uses type guards for safe property access instead of brittle type assertions.
- */
-function extractRetryAfter(error: unknown): number | undefined {
-  // Safely navigate the error object structure
-  if (!isObject(error)) {
-    return undefined
-  }
-
-  if (!hasProperty(error, 'details') || !isObject(error.details)) {
-    return undefined
-  }
-
-  const details = error.details
-  const status = hasProperty(details, 'status') ? details.status : undefined
-  const headers = hasProperty(details, 'headers') && isObject(details.headers) ? details.headers : undefined
-
-  // Extract nested error type: details.error.error.type
-  let errorType: unknown
-  if (hasProperty(details, 'error') && isObject(details.error)) {
-    const errorObj = details.error
-    if (hasProperty(errorObj, 'error') && isObject(errorObj.error)) {
-      const innerError = errorObj.error
-      if (hasProperty(innerError, 'type')) {
-        errorType = innerError.type
-      }
-    }
-  }
-
-  // Check if it's a rate limit error
-  if (status !== 429 && errorType !== 'rate_limit_error') {
-    return undefined
-  }
-
-  // Try to extract retry-after header
-  if (headers && hasProperty(headers, 'retry-after')) {
-    const retryAfterStr = headers['retry-after']
-    if (typeof retryAfterStr === 'string') {
-      const seconds = parseInt(retryAfterStr, 10)
-      if (!isNaN(seconds) && seconds > 0) {
-        return seconds * 1000 // Convert to milliseconds
-      }
-    }
-  }
-
-  return undefined
+export function isTransientLLMError(error: unknown): boolean {
+  const details = errorDetails(error)
+  const status = llmErrorStatus(error)
+  if (status !== undefined) return [408, 429, 500, 502, 503, 504, 529].includes(status)
+  return (
+    ['APIConnectionError', 'APIConnectionTimeoutError'].includes(String(details.name)) ||
+    ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(String(details.code))
+  )
 }
 
-/**
- * Retry for LLM calls with rate-limit awareness.
- * Respects retry-after header from 429 responses instead of fixed backoff.
- */
-export async function retryLLMWithRateLimit<T>(
-  fn: () => Promise<T>,
-  maxAttempts: number = 3
-): Promise<T> {
-  let lastError: Error | undefined
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+export async function retryLLMWithRateLimit<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await fn()
     } catch (error) {
-      lastError = error as Error
-
-      if (attempt === maxAttempts) {
-        break
-      }
-
-      // Check for rate limit with retry-after
-      const retryAfterMs = extractRetryAfter(error)
-
-      if (retryAfterMs !== undefined) {
-        // Rate limit - wait the specified duration
-        // Cap at 5 minutes to avoid extremely long waits
-        const waitMs = Math.min(retryAfterMs, 5 * 60 * 1000)
-
-        logger.warn(
-          {
-            error: lastError.message,
-            attempt,
-            maxAttempts,
-            retryAfterMs,
-            waitMs,
-          },
-          'Rate limited - waiting before retry'
-        )
-
-        await sleep(waitMs)
-      } else {
-        // Not a rate limit or no retry-after - use short fixed delay
-        const delayMs = 1000
-
-        logger.warn(
-          {
-            error: lastError.message,
-            attempt,
-            maxAttempts,
-            delayMs,
-          },
-          'Retrying after error'
-        )
-
-        await sleep(delayMs)
-      }
+      if (attempt >= maxAttempts || !isTransientLLMError(error)) throw error
+      const headers = errorDetails(error).headers as Record<string, string> | Headers | undefined
+      const value =
+        headers instanceof Headers ? headers.get('retry-after') : headers?.['retry-after']
+      const seconds = value ? Number(value) : NaN
+      const retryAfter = value
+        ? Number.isFinite(seconds)
+          ? seconds * 1000
+          : Date.parse(value) - Date.now()
+        : NaN
+      // Hand long waits back to the caller, without retrying ahead of the server.
+      if (retryAfter > 30_000) throw error
+      const delayMs = Math.max(
+        1000 * 2 ** (attempt - 1),
+        Number.isFinite(retryAfter) ? retryAfter : 0
+      )
+      logger.warn(
+        { attempt, status: llmErrorStatus(error), delayMs },
+        'Retrying transient LLM failure'
+      )
+      await sleep(Math.min(delayMs, 30_000))
     }
   }
-
-  throw lastError
 }
 
 /**
@@ -219,10 +144,9 @@ export async function retryDiscord<T>(
   maxBackoffMs: number = 32000
 ): Promise<T> {
   return retryWithBackoff(fn, {
-    maxAttempts: 10,  // Generous retry count for Discord
+    maxAttempts: 10, // Generous retry count for Discord
     initialDelay: 1000,
     maxDelay: maxBackoffMs,
-    exponential: true,
+    exponential: true
   })
 }
-
