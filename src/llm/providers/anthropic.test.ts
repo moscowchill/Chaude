@@ -48,18 +48,20 @@ const reply = (content: unknown[], model = 'claude-haiku-5-5') => ({
 })
 const text = reply([{ type: 'text', text: 'A quantum-resistant ledger.' }])
 
+const streamed = (message: unknown) => ({ finalMessage: () => Promise.resolve(message) })
+
 beforeEach(() => {
-  sdk.create.mockReset().mockResolvedValue(text)
-  sdk.betaCreate.mockReset().mockResolvedValue(text)
-  sdk.stream.mockReset().mockReturnValue({ finalMessage: () => Promise.resolve(text) })
-  sdk.betaStream.mockReset().mockReturnValue({ finalMessage: () => Promise.resolve(text) })
+  sdk.create.mockReset()
+  sdk.betaCreate.mockReset()
+  sdk.stream.mockReset().mockReturnValue(streamed(text))
+  sdk.betaStream.mockReset().mockReturnValue(streamed(text))
   sdk.countTokens.mockReset().mockResolvedValue({ input_tokens: 42 })
 })
 
 describe('Anthropic provider with Claude Haiku 5.5', () => {
   it('sends no temperature and turns thinking off by default', async () => {
     await new AnthropicProvider('key').complete(request('claude-haiku-5-5'))
-    const params = sdk.create.mock.calls[0][0]
+    const params = sdk.stream.mock.calls[0][0]
     expect(params).not.toHaveProperty('temperature')
     expect(params.thinking).toEqual({ type: 'disabled' })
     expect(params).not.toHaveProperty('output_config')
@@ -69,20 +71,20 @@ describe('Anthropic provider with Claude Haiku 5.5', () => {
 
   it('runs adaptive thinking at the configured effort when the bot asks for it', async () => {
     await new AnthropicProvider('key').complete(request('claude-haiku-5-5', { thinking: 'adaptive', effort: 'medium' }))
-    const params = sdk.create.mock.calls[0][0]
+    const params = sdk.stream.mock.calls[0][0]
     expect(params.thinking).toEqual({ type: 'adaptive' })
     expect(params.output_config).toEqual({ effort: 'medium' })
   })
 
   it('returns thinking blocks verbatim for the tool loop, apart from the text', async () => {
-    sdk.create.mockResolvedValue(
+    sdk.stream.mockReturnValue(streamed(
       reply([
         { type: 'thinking', thinking: '', signature: 'sig-1' },
         { type: 'redacted_thinking', data: 'opaque' },
         { type: 'text', text: 'hi' },
         { type: 'tool_use', id: 'tu_1', name: 'save_note', input: { text: 'x' } },
       ])
-    )
+    ))
     const completion = await new AnthropicProvider('key').complete(request('claude-haiku-5-5', { thinking: 'adaptive' }))
     expect(completion.content).toEqual([
       { type: 'thinking', thinking: '', signature: 'sig-1' },
@@ -95,7 +97,7 @@ describe('Anthropic provider with Claude Haiku 5.5', () => {
   it('drops a trailing assistant turn, which the model would reject as a prefill', async () => {
     const withPrefill: ProviderMessage[] = [...chat, { role: 'assistant', content: 'Chaude:' }]
     await new AnthropicProvider('key').complete(request('claude-haiku-5-5', { messages: withPrefill }))
-    expect(sdk.create.mock.calls[0][0].messages).toEqual([{ role: 'user', content: 'alice: what is QRL?' }])
+    expect(sdk.stream.mock.calls[0][0].messages).toEqual([{ role: 'user', content: 'alice: what is QRL?' }])
   })
 
   it('warns once per request about a dropped prefill, not once per count and call', async () => {
@@ -118,7 +120,7 @@ describe('Anthropic provider with Claude Haiku 5.5', () => {
     await expect(
       new AnthropicProvider('key').complete(request('claude-haiku-5-5', { messages: onlyBot }))
     ).rejects.toThrow('Nothing to answer')
-    expect(sdk.create).not.toHaveBeenCalled()
+    expect(sdk.stream).not.toHaveBeenCalled()
   })
 
   it('counts tokens for the conversation and thinking setting it will send', async () => {
@@ -138,8 +140,8 @@ describe('Anthropic provider with Claude Opus 5.5', () => {
     await new AnthropicProvider('key').complete(
       request('claude-opus-5-5', { thinking: 'disabled', effort: 'medium' })
     )
-    expect(sdk.create).not.toHaveBeenCalled()
-    const params = sdk.betaCreate.mock.calls[0][0]
+    expect(sdk.stream).not.toHaveBeenCalled()
+    const params = sdk.betaStream.mock.calls[0][0]
     expect(params.betas).toEqual(['server-side-fallback-2026-07-01'])
     expect(params.fallbacks).toBe('default')
     expect(params).not.toHaveProperty('thinking')
@@ -147,11 +149,14 @@ describe('Anthropic provider with Claude Opus 5.5', () => {
     expect(params.output_config).toEqual({ effort: 'medium' })
   })
 
-  it('streams a large request and returns the final message', async () => {
+  it('streams every request, large ones included, and returns the final message', async () => {
     const completion = await new AnthropicProvider('key').complete(request('claude-opus-5-5', { max_tokens: 32_000 }))
-    expect(sdk.betaCreate).not.toHaveBeenCalled()
     expect(sdk.betaStream.mock.calls[0][0].max_tokens).toBe(32_000)
     expect(completion.content).toEqual([{ type: 'text', text: 'A quantum-resistant ledger.' }])
+    await new AnthropicProvider('key').complete(request('claude-haiku-5-5'))
+    expect(sdk.stream).toHaveBeenCalledTimes(1)
+    expect(sdk.create).not.toHaveBeenCalled()
+    expect(sdk.betaCreate).not.toHaveBeenCalled()
   })
 })
 
@@ -161,7 +166,7 @@ describe('Anthropic provider with Claude Haiku 4.5', () => {
     await new AnthropicProvider('key').complete(
       request('claude-haiku-4-5-20251001', { messages: withPrefill, thinking: 'adaptive', effort: 'low' })
     )
-    const params = sdk.create.mock.calls[0][0]
+    const params = sdk.stream.mock.calls[0][0]
     expect(params.temperature).toBe(0.7)
     expect(params).not.toHaveProperty('thinking')
     expect(params).not.toHaveProperty('output_config')

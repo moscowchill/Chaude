@@ -23,6 +23,10 @@ interface NotesState {
   notes: Note[]
   lastModifiedMessageId: string | null
   lastConsolidationAt?: string  // ISO date of last consolidation run
+  /** ISO date of the last run that called the model, whatever the outcome. The
+   *  cooldown counts from it, so a failing cabinet is retried once per cooldown
+   *  instead of on every activation. */
+  lastConsolidationAttemptAt?: string
   /** One-deep backup of the notes array as it was before the last consolidation.
    *  Consolidation is an irreversible LLM rewrite of the bot's long-term memory -
    *  this gives one level of manual recovery if a merge loses information. */
@@ -377,12 +381,16 @@ const plugin: ToolPlugin = {
     const state = await context.getState<NotesState>(scope)
     if (!state?.notes.length) return
 
-    // Check cooldown
+    // Check cooldown, counted from the last success or the last attempt. Before the
+    // attempt stamp, a cabinet that failed (cut off, unparseable, not reduced) was
+    // retried on every activation at full model cost.
     const cooldownHours = config.consolidation_cooldown_hours ?? 24
-    if (state.lastConsolidationAt) {
-      const hoursSince = (Date.now() - new Date(state.lastConsolidationAt).getTime()) / (1000 * 60 * 60)
-      if (hoursSince < cooldownHours) return
-    }
+    const lastRun = Math.max(
+      ...[state.lastConsolidationAt, state.lastConsolidationAttemptAt]
+        .map(t => (t ? new Date(t).getTime() : 0))
+        .filter(t => Number.isFinite(t))
+    )
+    if (lastRun > 0 && (Date.now() - lastRun) / (1000 * 60 * 60) < cooldownHours) return
 
     const minNotes = config.min_notes_to_consolidate ?? 5
     const model = config.consolidation_model || 'claude-opus-5-5'
@@ -394,6 +402,18 @@ const plugin: ToolPlugin = {
       if (!cabinets.has(cat)) cabinets.set(cat, [])
       cabinets.get(cat)!.push(note)
     }
+    if (![...cabinets.values()].some(notes => notes.length >= minNotes)) return
+
+    // Claim the run before calling the model: a later activation inside the cooldown
+    // (or one that starts while this run is still waiting on the model) skips it.
+    // Re-read so the stamp never overwrites notes saved since the read above.
+    const attemptAt = new Date().toISOString()
+    const latest = await context.getState<NotesState>(scope)
+    if (latest) {
+      latest.lastConsolidationAttemptAt = attemptAt
+      await context.setState(scope, latest)
+    }
+    state.lastConsolidationAttemptAt = attemptAt
 
     let totalRemoved = 0
     let totalCreated = 0

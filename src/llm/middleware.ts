@@ -446,7 +446,13 @@ export class LLMMiddleware {
    * would drop cache_control blocks and produce a different byte prefix.
    */
   buildChatMessages(request: LLMRequest): ProviderMessage[] {
-    return this.transformToChat(request).messages
+    const messages = this.transformToChat(request).messages
+    // Match what the first call sent: for a model without assistant prefill the provider
+    // dropped trailing assistant turns, and the continuation appends to that same prefix
+    if (this.selectProvider(request.config.model).supportsPrefill?.(request.config.model) === false) {
+      while (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant') messages.pop()
+    }
+    return messages
   }
 
   private transformToChat(request: LLMRequest, _provider?: LLMProvider): ProviderRequest {

@@ -4,6 +4,7 @@ import { atomicJson, SerialQueue } from '../utils/atomic-state.js'
 import type { LLMCompletion } from '../types.js'
 import type { LLMProvider, ProviderRequest } from './middleware.js'
 import { llmErrorStatus } from '../utils/retry.js'
+import { logger } from '../utils/logger.js'
 
 export class BudgetError extends Error {}
 export interface RateCard {
@@ -202,6 +203,12 @@ export class DailyBudget {
         completion.model && Object.hasOwn(this.prices, completion.model)
           ? this.prices[completion.model]
           : price
+      if (completion.model && completion.model !== request.model && !Object.hasOwn(this.prices, completion.model)) {
+        logger.warn(
+          { requested: request.model, answered: completion.model },
+          'Answering model has no price entry: charged at the requested model price'
+        )
+      }
       const rates = rateCard(
         answered ?? price,
         usage.inputTokens + (usage.cacheCreationTokens || 0) + (usage.cacheReadTokens || 0)

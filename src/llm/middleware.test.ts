@@ -227,3 +227,24 @@ describe('prefill mode on a model without assistant prefill', () => {
     expect(called).toBe(false)
   })
 })
+
+describe('buildChatMessages for tool continuations', () => {
+  it('drops a trailing bot turn for a model without prefill, matching the first call', () => {
+    const middleware = new LLMMiddleware()
+    const stub: LLMProvider = {
+      name: 'anthropic',
+      supportedModes: ['prefill', 'chat'],
+      supportsPrefill: (model) => model !== 'claude-haiku-5-5',
+      complete: async (req: ProviderRequest): Promise<LLMCompletion> => ({
+        content: [], stopReason: 'end_turn', usage: { inputTokens: 0, outputTokens: 0 }, model: req.model,
+      }),
+    }
+    middleware.registerProvider(stub, 'anthropic')
+    middleware.setVendorConfigs({ anthropic: { provides: ['claude-*'] } } as never)
+    const conversation = { messages: [msg('Alice', 'hi'), msg('Chaude', 'hello there')] }
+    const haiku55 = middleware.buildChatMessages({ ...conversation, config: makeConfig({ model: 'claude-haiku-5-5' }) })
+    expect(haiku55.at(-1)?.role).toBe('user')
+    const haiku45 = middleware.buildChatMessages({ ...conversation, config: makeConfig() })
+    expect(haiku45.at(-1)?.role).toBe('assistant')
+  })
+})

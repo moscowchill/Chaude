@@ -185,6 +185,40 @@ describe('notes consolidation', () => {
     expect(state.preConsolidationBackup).toBeUndefined()
   })
 
+  it.each([
+    ['a reply cut off at max_tokens', 'max_tokens' as const, '[{"content":"merged","category":"tasks"}]'],
+    ['an unparseable reply', 'end_turn' as const, 'sorry, I cannot do that'],
+  ])('waits out the cooldown after %s instead of retrying on the next activation', async (_case, stopReason, reply) => {
+    const { context, store, llmCalls } = makeContext({
+      pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5, consolidation_cooldown_hours: 24 },
+      initialState: { notes: [...sixNotes], lastModifiedMessageId: null },
+      llmResponse: reply,
+      llmStopReason: stopReason,
+    })
+
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+
+    expect(llmCalls).toHaveLength(1)
+    const state = store.get('channel') as { notes: unknown[]; lastConsolidationAttemptAt?: string; lastConsolidationAt?: string }
+    expect(state.lastConsolidationAttemptAt).toBeDefined()
+    expect(state.lastConsolidationAt).toBeUndefined()
+    expect(state.notes).toHaveLength(6)
+  })
+
+  it('stamps no attempt when no cabinet qualifies', async () => {
+    const { context, store, llmCalls } = makeContext({
+      pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5 },
+      initialState: { notes: sixNotes.slice(0, 3), lastModifiedMessageId: null },
+      llmResponse: '[{"content":"merged","category":"tasks"}]',
+    })
+
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+
+    expect(llmCalls).toHaveLength(0)
+    expect((store.get('channel') as { lastConsolidationAttemptAt?: string }).lastConsolidationAttemptAt).toBeUndefined()
+  })
+
   it('keeps originals when the LLM returns garbage', async () => {
     const { context, store } = makeContext({
       pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5 },

@@ -14,8 +14,6 @@ import { anthropicModelRules, thinkingParam } from './anthropic-models.js'
 
 /** Beta header for `fallbacks: 'default'`: a refused request is answered by a fallback model */
 const SERVER_FALLBACK_BETA = 'server-side-fallback-2026-07-01'
-/** Above this, requests stream: a long non-streaming request can outlast the HTTP timeout */
-const STREAM_ABOVE_MAX_TOKENS = 16_000
 
 // Extended usage type to include cache tokens (not in base Anthropic types)
 interface AnthropicUsageWithCache {
@@ -78,20 +76,18 @@ export class AnthropicProvider implements LLMProvider {
     return count.input_tokens
   }
 
-  /** Send a request: through the beta endpoint when it needs beta features, streamed when large */
+  /**
+   * Send a request, always streamed and collected into the final message. The client
+   * timeout only covers the wait for response headers, so a long reply (thinking
+   * included) can't be cut off mid-generation. Beta features go to the beta endpoint.
+   */
   private async send(params: Record<string, unknown>, betas: string[]): Promise<Anthropic.Message> {
-    const stream = (params.max_tokens as number) > STREAM_ABOVE_MAX_TOKENS
     if (betas.length > 0) {
       const body = { ...params, betas } as unknown as Anthropic.Beta.MessageCreateParamsNonStreaming
-      const message = stream
-        ? await this.client.beta.messages.stream(body).finalMessage()
-        : await this.client.beta.messages.create(body)
-      return message as unknown as Anthropic.Message
+      return (await this.client.beta.messages.stream(body).finalMessage()) as unknown as Anthropic.Message
     }
     const body = params as unknown as Anthropic.MessageCreateParamsNonStreaming
-    return stream
-      ? await this.client.messages.stream(body).finalMessage()
-      : await this.client.messages.create(body)
+    return await this.client.messages.stream(body).finalMessage()
   }
 
   async complete(request: ProviderRequest): Promise<LLMCompletion> {
@@ -161,7 +157,7 @@ export class AnthropicProvider implements LLMProvider {
       }
 
     // Log request to file BEFORE making the call (so we have it even on error)
-    const requestRef = this.logRequestToFile(params)
+    const requestRef = this.logRequestToFile(betas.length > 0 ? { ...params, betas } : params)
     
     try {
       logger.debug({ model: request.model, traceId: trace?.getTraceId() }, 'Calling Anthropic API')
