@@ -102,11 +102,66 @@ describe('compaction summarization direction', () => {
     expect(prompt).toContain('message-number-1')
     expect(prompt).toContain('message-number-5')
     expect(prompt).not.toContain('message-number-8')
+    expect(summarizeCall!.max_tokens).toBe(1024)
 
     // State marks exactly the oldest 5 as summarized
     const state = store.get('channel') as { summaries: unknown[]; summarizedMessageIds: string[] }
     expect(state.summaries).toHaveLength(1)
     expect(state.summarizedMessageIds).toEqual(['m1', 'm2', 'm3', 'm4', 'm5'])
+  })
+})
+
+describe('compaction source selection', () => {
+  it('asks with thinking at low effort and room to finish, then uses the numbers', async () => {
+    // With thinking off, Haiku 5.5 reasoned in the visible reply and hit the old
+    // 100-token cap before any numbers, so selection silently picked nothing
+    const summaries = Array.from({ length: 6 }, (_, i) => ({
+      id: `s${i}`,
+      messageRange: { start: `a${i}`, end: `b${i}` },
+      summary: `summary number ${i}`,
+      topics: ['topic'],
+      createdAt: '2026-06-01T00:00:00.000Z',
+      tokenEstimate: 10,
+    }))
+    const { context, llmCalls } = makeContext({
+      pluginConfig: { enabled: true, enable_selection: true, selection_threshold: 5 },
+      initialState: { summaries, lastCompactionMessageId: null, summarizedMessageIds: [] },
+      llmResponse: '2, 4',
+    })
+
+    const injections = await compactionPlugin.getContextInjections!(context)
+
+    const selection = llmCalls.find(c => JSON.stringify(c.messages).includes('Respond with ONLY the numbers'))
+    expect(selection).toMatchObject({ max_tokens: 1024, thinking: 'adaptive', effort: 'low' })
+    expect(JSON.stringify(injections)).toContain('summary number 1')
+    expect(JSON.stringify(injections)).toContain('summary number 3')
+    expect(JSON.stringify(injections)).not.toContain('summary number 5')
+  })
+})
+
+describe('compaction source selection fallback', () => {
+  const summaries = Array.from({ length: 6 }, (_, i) => ({
+    id: `s${i}`,
+    messageRange: { start: `a${i}`, end: `b${i}` },
+    summary: `summary number ${i}`,
+    topics: ['topic'],
+    createdAt: '2026-06-01T00:00:00.000Z',
+    tokenEstimate: 10,
+  }))
+  it.each([
+    ['a wordy reply', 'The latest message is a greeting, so nothing applies here.', 'end_turn' as const],
+    ['a reply cut off at max_tokens', '2, 4', 'max_tokens' as const],
+  ])('falls back to the most recent sources on %s instead of selecting nothing', async (_case, reply, stopReason) => {
+    const { context } = makeContext({
+      pluginConfig: { enabled: true, enable_selection: true, selection_threshold: 5, max_injections: 2 },
+      initialState: { summaries, lastCompactionMessageId: null, summarizedMessageIds: [] },
+      llmResponse: reply,
+      llmStopReason: stopReason,
+    })
+    const injected = JSON.stringify(await compactionPlugin.getContextInjections!(context))
+    expect(injected).toContain('summary number 5')
+    expect(injected).toContain('summary number 4')
+    expect(injected).not.toContain('summary number 1')
   })
 })
 

@@ -23,6 +23,9 @@ import { logger } from '../utils/logger.js'
 import { llmErrorStatus, retryLLMWithRateLimit } from '../utils/retry.js'
 import { matchesAny } from '../utils/validation.js'
 
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
 export interface LLMProvider {
   readonly name: string
   readonly supportedModes: ('prefill' | 'chat')[]
@@ -507,19 +510,22 @@ export class LLMMiddleware {
       }
     }
 
+    // Match by Discord username if available, otherwise fall back to inner name
+    const isBotMessage = (msg: ParticipantMessage) => botAsAssistant && (botDiscordUsername
+      ? msg.participant === botDiscordUsername
+      : msg.participant === botName)
+    const dayLines = this.dayLines(request.messages, isBotMessage)
+
     // Group consecutive non-bot messages
     let buffer: ParticipantMessage[] = []
 
     for (const msg of request.messages) {
-      // Match by Discord username if available, otherwise fall back to inner name
-      const isBot = botAsAssistant && (botDiscordUsername
-        ? msg.participant === botDiscordUsername
-        : msg.participant === botName)
+      const isBot = isBotMessage(msg)
 
       if (isBot) {
         // Flush buffer
         if (buffer.length > 0) {
-          const userMsg = this.mergeToUserMessage(buffer, promptCachingEnabled)
+          const userMsg = this.mergeToUserMessage(buffer, promptCachingEnabled, dayLines)
           if (this.hasContent(userMsg)) {
             messages.push(userMsg)
           }
@@ -550,7 +556,7 @@ export class LLMMiddleware {
 
     // Flush remaining buffer (this is the last user message)
     if (buffer.length > 0) {
-      const userMsg = this.mergeToUserMessage(buffer, promptCachingEnabled)
+      const userMsg = this.mergeToUserMessage(buffer, promptCachingEnabled, dayLines)
       if (this.hasContent(userMsg)) {
         // Add persona prefill ending if configured (adds "botname:" to prompt completion)
         if (usePersonaPrefill) {
@@ -611,7 +617,37 @@ export class LLMMiddleware {
     return false
   }
 
-  private mergeToUserMessage(messages: ParticipantMessage[], promptCachingEnabled = false): ProviderMessage {
+  /**
+   * Date lines as Discord shows them: "[Wednesday 7 October 2026]" before the first
+   * message with text of each UTC day on the user side. Without them a merged backlog reads as one
+   * live conversation, and the model answers posts that are days old. Bot turns get none,
+   * so the model never learns to write them, and they don't advance the day: the next
+   * user message on a new day still gets its line.
+   */
+  private dayLines(
+    messages: ParticipantMessage[],
+    isBot: (msg: ParticipantMessage) => boolean
+  ): Map<ParticipantMessage, string> {
+    const lines = new Map<ParticipantMessage, string>()
+    let lastDay: string | undefined
+    for (const msg of messages) {
+      // Only messages with text carry a line: an image-only message renders no line of
+      // its own, and a bot turn after it would drop a line waiting for the next text
+      if (isBot(msg) || !msg.timestamp || !this.extractText(msg.content)) continue
+      const d = new Date(msg.timestamp)
+      if (Number.isNaN(d.getTime())) continue
+      const day = `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+      if (day !== lastDay) lines.set(msg, `[${day}]`)
+      lastDay = day
+    }
+    return lines
+  }
+
+  private mergeToUserMessage(
+    messages: ParticipantMessage[],
+    promptCachingEnabled = false,
+    dayLines?: Map<ParticipantMessage, string>
+  ): ProviderMessage {
     // Text parts up to and including the cache-marked message form the stable
     // cached prefix; parts after it (and all images) stay uncached so image
     // rotation and new messages don't invalidate the prefix.
@@ -625,6 +661,8 @@ export class LLMMiddleware {
       const text = this.extractText(msg.content)
       if (text) {
         const target = hasMarker && !passedMarker ? cachedParts : uncachedParts
+        const dayLine = dayLines?.get(msg)
+        if (dayLine) target.push(dayLine)
         target.push(`${msg.participant}: ${text}`)
       }
       if (hasMarker && msg.cacheControl) {

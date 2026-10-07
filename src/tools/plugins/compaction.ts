@@ -460,9 +460,14 @@ Always include cabinets about ongoing commitments or unresolved items if relevan
 Respond with ONLY the numbers, comma-separated. Example: 1, 3, 5
 If none are relevant, respond: NONE`
 
+    // With thinking off, Claude Haiku 5.5 reasons in the visible reply ("The latest
+    // message is a greeting...") and hits the cap before any numbers, so selection
+    // silently picks nothing. Thinking at low effort keeps the reply to the numbers.
     const response = await context.llmComplete({
       model,
-      max_tokens: 100,
+      max_tokens: 1024,
+      thinking: 'adaptive',
+      effort: 'low',
       messages: [{ role: 'user', content: prompt }],
     })
 
@@ -470,11 +475,18 @@ If none are relevant, respond: NONE`
     if (text === 'NONE') {
       return { summaries: [], cabinets: [] }
     }
+    // A cut-off or wordy reply would silently select nothing: take the fallback below
+    if (response.stopReason === 'max_tokens') {
+      throw new Error('selection reply was cut off at max_tokens')
+    }
 
     const selectedIndices = text
       .split(',')
       .map(s => parseInt(s.trim(), 10) - 1)
       .filter(i => !isNaN(i) && i >= 0 && i < indexMap.length)
+    if (selectedIndices.length === 0) {
+      throw new Error(`selection reply had no usable numbers: ${JSON.stringify(text.slice(0, 120))}`)
+    }
 
     const resultSummaries: SummarySource[] = []
     const resultCabinets: CabinetSource[] = []
@@ -649,7 +661,8 @@ Example response:
 
     const response = await context.llmComplete({
       model,
-      max_tokens: 600,
+      // Headroom: Claude Haiku 5.5 counts ~30% more tokens for the same text
+      max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }],
     })
 
