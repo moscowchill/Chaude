@@ -1781,6 +1781,8 @@ export class ContextBuilder {
       frequency_penalty: config.frequency_penalty,
       prompt_caching: config.prompt_caching,
       participant_stop_sequences: config.participant_stop_sequences,
+      thinking: config.thinking,
+      effort: config.effort,
     }
   }
 }

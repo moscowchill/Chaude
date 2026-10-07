@@ -44,13 +44,36 @@ export interface ParticipantMessage {
 }
 
 /**
- * Content blocks - supports text, images, and tool use
+ * Content blocks - supports text, images, tool use and API thinking
  */
-export type ContentBlock = 
+export type ContentBlock =
   | TextContent
   | ImageContent
   | ToolUseContent
   | ToolResultContent
+  | ThinkingContent
+  | RedactedThinkingContent
+
+/**
+ * Reasoning from an Anthropic model with API thinking on. Never shown to users; kept
+ * verbatim (signature included, text often empty) because a tool continuation must
+ * send it back unmodified.
+ */
+export interface ThinkingContent {
+  type: 'thinking'
+  thinking: string
+  signature: string
+}
+
+export interface RedactedThinkingContent {
+  type: 'redacted_thinking'
+  data: string
+}
+
+/** Anthropic API thinking: `adaptive` lets the model decide how much to think */
+export type ThinkingMode = 'adaptive' | 'disabled'
+/** Anthropic `output_config.effort`: how much the model thinks and writes */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface TextContent {
   type: 'text'
@@ -139,6 +162,8 @@ export interface ModelConfig {
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
   participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
+  thinking?: ThinkingMode  // Anthropic API thinking (unset: the provider's per-model default)
+  effort?: Effort  // Anthropic output_config.effort (unset: the model's default)
 }
 
 /**
@@ -159,7 +184,9 @@ export interface BotConfig {
   top_p: number
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
-  
+  thinking?: ThinkingMode  // Anthropic API thinking for replies (chat mode)
+  effort?: Effort  // Anthropic output_config.effort for replies (chat mode)
+
   // Context config
   recency_window_messages?: number  // Max number of messages
   recency_window_characters?: number  // Max number of characters
@@ -179,7 +206,7 @@ export interface BotConfig {
   include_text_attachments: boolean
   max_text_attachment_kb: number  // Max size per text attachment in KB
   max_message_chars: number       // Max chars per message (0 = unlimited, truncates with notice)
-  summarization_model?: string    // Model for summarizing oversized attachments (default: claude-haiku-4-5-20251001)
+  summarization_model?: string    // Model for summarizing oversized attachments (default: claude-haiku-5-5)
 
   // Tool config
   tools_enabled: boolean

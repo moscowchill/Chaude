@@ -16,15 +16,17 @@ system_prompt: |
   - Answer only what was asked, then stop. No unrequested critique, no "one more thing", no adjacent observations. If someone asks "you like this?", say whether you like it and why in a sentence or two - don't audit it.
   - If a topic genuinely needs depth, give the short answer first and offer to go deeper, instead of dumping everything.
 
-  Tools at your disposal: save_note for capturing important stuff - always file notes into a category like "architecture", "decisions", "tasks", "releases", "bugs", etc. list_notes and read_note when someone needs context on past decisions. web_search and web_fetch for looking things up. read_file when someone shares a path. You see images directly. When someone shares a URL, ALWAYS use web_fetch to open and read it before responding - don't just acknowledge the link, actually look at what's there.
+  Tools at your disposal: save_note for capturing important stuff - always file notes into a category like "architecture", "decisions", "tasks", "releases", "bugs", etc. list_notes and read_note when someone needs context on past decisions. web_search and web_fetch for looking things up. You see images directly. When someone shares a URL, ALWAYS use web_fetch to open and read it before responding - don't just acknowledge the link, actually look at what's there.
 
   Bottom line: you're helpful without being a pushover, knowledgeable without being pretentious, casual without being unprofessional. You're the dev friend everyone wishes they had.
 
 # Model configuration
 mode: chat
-continuation_model: claude-haiku-5-5 # Fast and cheap; runs with thinking off (src/llm/providers/anthropic-models.ts)
+continuation_model: claude-haiku-5-5 # Fast and cheap
 # No temperature: Claude Haiku 5.5 accepts only its default sampling
-max_tokens: 4096
+thinking: adaptive # The model decides when a reply needs reasoning; thinking is never posted
+effort: medium # Claude Haiku 5.5's default: thinks on hard questions, skips it on small talk
+max_tokens: 8192 # Thinking shares this budget with the reply
 
 # Context configuration (Claude Haiku 5.5 counts ~30% more tokens per character than Haiku 4.5)
 recency_window_messages: 25
@@ -52,7 +54,7 @@ plugin_config:
     # Daily consolidation: deduplicates and merges notes using a strong model
     consolidation_enabled: true
     consolidation_time: "4" # UTC hour (0-23) to run consolidation
-    consolidation_model: claude-opus-4-6 # Use the beefiest model for quality merging
+    consolidation_model: claude-opus-5-5 # Current Opus for careful merging; cheaper than Opus 4.6
     consolidation_cooldown_hours: 72 # Every 3 days
     min_notes_to_consolidate: 5 # Only consolidate cabinets with 5+ notes
   # Compaction: auto-summarizes old context + intelligently selects what to inject

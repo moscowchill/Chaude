@@ -10,7 +10,10 @@ import { LLMCompletion, ContentBlock, LLMError, TextContent } from '../../types.
 import { logger } from '../../utils/logger.js'
 import { getCurrentTrace } from '../../trace/index.js'
 import { processRequestForLogging } from '../../utils/blob-store.js'
-import { anthropicModelRules } from './anthropic-models.js'
+import { anthropicModelRules, thinkingParam } from './anthropic-models.js'
+
+/** Beta header for `fallbacks: 'default'`: a refused request is answered by a fallback model */
+const SERVER_FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 
 // Extended usage type to include cache tokens (not in base Anthropic types)
 interface AnthropicUsageWithCache {
@@ -30,12 +33,20 @@ export class AnthropicProvider implements LLMProvider {
     this.client = new Anthropic({ apiKey, maxRetries: 0, timeout: 120_000 })
   }
 
+  /** Whether the model accepts an assistant prefill (the middleware refuses prefill mode otherwise) */
+  supportsPrefill(model: string): boolean {
+    return anthropicModelRules(model).assistantPrefill
+  }
+
   /**
    * The non-system turns to send. Models that reject an assistant prefill get the
-   * conversation up to its last user turn: in chat mode a trailing assistant turn only
-   * happens when the bot's own message is the newest one in the channel.
+   * conversation up to its last user turn. In chat mode the conversation ends on an
+   * assistant turn when the bot's own message is the newest one, when the triggering
+   * message has no text or image left after filtering, or for a queued second activation
+   * after the first reply was posted. Older models continued the bot's turn as a
+   * prefill; these models answer the last user turn again.
    */
-  private conversation(model: string, messages: ProviderMessage[]): ProviderMessage[] {
+  private conversation(model: string, messages: ProviderMessage[], warn = false): ProviderMessage[] {
     const turns = messages.filter((m) => m.role !== 'system')
     if (anthropicModelRules(model).assistantPrefill) return turns
     let end = turns.length
@@ -43,7 +54,7 @@ export class AnthropicProvider implements LLMProvider {
     if (end === 0) {
       throw new LLMError(`Nothing to answer: ${model} needs the conversation to end with a user turn`)
     }
-    if (end < turns.length) {
+    if (warn && end < turns.length) {
       logger.warn({ model, dropped: turns.length - end }, 'Dropped trailing assistant turns: this model rejects assistant prefill')
     }
     return turns.slice(0, end)
@@ -57,15 +68,32 @@ export class AnthropicProvider implements LLMProvider {
       system: system.length ? system : undefined,
       messages: this.conversation(request.model, request.messages),
       tools: request.tools?.length ? request.tools : undefined,
-      thinking: anthropicModelRules(request.model).thinking,
+      thinking: thinkingParam(anthropicModelRules(request.model), request.thinking),
     }
-    const count = await this.client.beta.messages.countTokens(
-      params as unknown as Parameters<typeof this.client.beta.messages.countTokens>[0]
+    const count = await this.client.messages.countTokens(
+      params as unknown as Anthropic.MessageCountTokensParams
     )
     return count.input_tokens
   }
 
+  /**
+   * Send a request, always streamed and collected into the final message. The client
+   * timeout only covers the wait for response headers, so a long reply (thinking
+   * included) can't be cut off mid-generation. Beta features go to the beta endpoint.
+   */
+  private async send(params: Record<string, unknown>, betas: string[]): Promise<Anthropic.Message> {
+    if (betas.length > 0) {
+      const body = { ...params, betas } as unknown as Anthropic.Beta.MessageCreateParamsNonStreaming
+      return (await this.client.beta.messages.stream(body).finalMessage()) as unknown as Anthropic.Message
+    }
+    const body = params as unknown as Anthropic.MessageCreateParamsNonStreaming
+    return await this.client.messages.stream(body).finalMessage()
+  }
+
   async complete(request: ProviderRequest): Promise<LLMCompletion> {
+    // Before the trace call starts: a conversation with nothing to answer throws here
+    // and leaves no unfinished LLM call in the trace
+    const nonSystemMessages = this.conversation(request.model, request.messages, true)
     const trace = getCurrentTrace()
     const callId = trace?.startLLMCall(trace.getLLMCallCount())
     const startTime = Date.now()
@@ -92,7 +120,6 @@ export class AnthropicProvider implements LLMProvider {
         }
       }
 
-      const nonSystemMessages = this.conversation(request.model, request.messages)
       const rules = anthropicModelRules(request.model)
 
       // Build request params (some models don't support both temperature and top_p)
@@ -110,8 +137,18 @@ export class AnthropicProvider implements LLMProvider {
       if (temperature !== undefined) {
         params.temperature = temperature
       }
-      if (rules.thinking) {
-        params.thinking = rules.thinking
+      const thinking = thinkingParam(rules, request.thinking)
+      if (thinking) {
+        params.thinking = thinking
+      }
+      if (request.effort && rules.adaptiveThinking) {
+        params.output_config = { effort: request.effort }
+      }
+      // Where available, a server-side fallback model answers a request that a safety
+      // classifier declines (routed by refusal category)
+      const betas = rules.serverFallback ? [SERVER_FALLBACK_BETA] : []
+      if (rules.serverFallback) {
+        params.fallbacks = 'default'
       }
 
       // Add tools if provided
@@ -120,12 +157,12 @@ export class AnthropicProvider implements LLMProvider {
       }
 
     // Log request to file BEFORE making the call (so we have it even on error)
-    const requestRef = this.logRequestToFile(params)
+    const requestRef = this.logRequestToFile(betas.length > 0 ? { ...params, betas } : params)
     
     try {
       logger.debug({ model: request.model, traceId: trace?.getTraceId() }, 'Calling Anthropic API')
 
-      const response = await this.client.messages.create(params as unknown as Anthropic.MessageCreateParams) as Anthropic.Message
+      const response = await this.send(params, betas)
 
       // Log response to file (and get ref for trace)
       const responseRef = this.logResponseToFile(response)
@@ -151,12 +188,14 @@ export class AnthropicProvider implements LLMProvider {
             input: block.input as Record<string, unknown>,
           }]
         }
-        // Reasoning blocks are never part of the reply (the pinned SDK predates their
-        // types, hence the cast). Claude Haiku 5.5 runs with thinking off, so they only
-        // arrive from a model configured without that rule.
-        const type = (block as { type: string }).type
-        if (type === 'thinking' || type === 'redacted_thinking') {
-          return []
+        // Reasoning blocks stay verbatim (signature included, text often empty): a tool
+        // continuation must send them back unmodified. Every reader of the reply takes
+        // only text blocks, so they never reach Discord.
+        if (block.type === 'thinking') {
+          return [{ type: 'thinking' as const, thinking: block.thinking, signature: block.signature }]
+        }
+        if (block.type === 'redacted_thinking') {
+          return [{ type: 'redacted_thinking' as const, data: block.data }]
         }
         // Unknown block type, return as text
         return [{ type: 'text' as const, text: JSON.stringify(block) }]
