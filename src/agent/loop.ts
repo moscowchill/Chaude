@@ -811,7 +811,7 @@ export class AgentLoop {
    */
   private async summarizeOversizedDocuments(documents: CachedDocument[], config: BotConfig): Promise<void> {
     const SUMMARIZE_THRESHOLD = 30_000  // Only summarize docs exceeding this char count
-    const model = config.summarization_model || 'claude-haiku-4-5-20251001'
+    const model = config.summarization_model || 'claude-haiku-5-5'
 
     for (const doc of documents) {
       if (doc.text.length <= SUMMARIZE_THRESHOLD) continue

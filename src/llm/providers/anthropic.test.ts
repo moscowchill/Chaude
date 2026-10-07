@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProviderMessage, ProviderRequest } from '../middleware.js'
 import { AnthropicProvider } from './anthropic.js'
+import { logger } from '../../utils/logger.js'
 
 const sdk = vi.hoisted(() => ({
   create: vi.fn(),
@@ -95,6 +96,21 @@ describe('Anthropic provider with Claude Haiku 5.5', () => {
     const withPrefill: ProviderMessage[] = [...chat, { role: 'assistant', content: 'Chaude:' }]
     await new AnthropicProvider('key').complete(request('claude-haiku-5-5', { messages: withPrefill }))
     expect(sdk.create.mock.calls[0][0].messages).toEqual([{ role: 'user', content: 'alice: what is QRL?' }])
+  })
+
+  it('warns once per request about a dropped prefill, not once per count and call', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => logger)
+    const provider = new AnthropicProvider('key')
+    const prefilled = request('claude-haiku-5-5', { messages: [...chat, { role: 'assistant', content: 'Chaude:' }] })
+    await provider.countInputTokens(prefilled)
+    await provider.complete(prefilled)
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('tells the middleware that prefill mode cannot work', () => {
+    expect(new AnthropicProvider('key').supportsPrefill('claude-haiku-5-5')).toBe(false)
+    expect(new AnthropicProvider('key').supportsPrefill('claude-haiku-4-5-20251001')).toBe(true)
   })
 
   it('refuses a conversation without a user turn before calling the API', async () => {

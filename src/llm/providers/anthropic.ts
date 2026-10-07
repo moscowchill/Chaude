@@ -35,12 +35,20 @@ export class AnthropicProvider implements LLMProvider {
     this.client = new Anthropic({ apiKey, maxRetries: 0, timeout: 120_000 })
   }
 
+  /** Whether the model accepts an assistant prefill (the middleware refuses prefill mode otherwise) */
+  supportsPrefill(model: string): boolean {
+    return anthropicModelRules(model).assistantPrefill
+  }
+
   /**
    * The non-system turns to send. Models that reject an assistant prefill get the
-   * conversation up to its last user turn: in chat mode a trailing assistant turn only
-   * happens when the bot's own message is the newest one in the channel.
+   * conversation up to its last user turn. In chat mode the conversation ends on an
+   * assistant turn when the bot's own message is the newest one, when the triggering
+   * message has no text or image left after filtering, or for a queued second activation
+   * after the first reply was posted. Older models continued the bot's turn as a
+   * prefill; these models answer the last user turn again.
    */
-  private conversation(model: string, messages: ProviderMessage[]): ProviderMessage[] {
+  private conversation(model: string, messages: ProviderMessage[], warn = false): ProviderMessage[] {
     const turns = messages.filter((m) => m.role !== 'system')
     if (anthropicModelRules(model).assistantPrefill) return turns
     let end = turns.length
@@ -48,7 +56,7 @@ export class AnthropicProvider implements LLMProvider {
     if (end === 0) {
       throw new LLMError(`Nothing to answer: ${model} needs the conversation to end with a user turn`)
     }
-    if (end < turns.length) {
+    if (warn && end < turns.length) {
       logger.warn({ model, dropped: turns.length - end }, 'Dropped trailing assistant turns: this model rejects assistant prefill')
     }
     return turns.slice(0, end)
@@ -87,6 +95,9 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async complete(request: ProviderRequest): Promise<LLMCompletion> {
+    // Before the trace call starts: a conversation with nothing to answer throws here
+    // and leaves no unfinished LLM call in the trace
+    const nonSystemMessages = this.conversation(request.model, request.messages, true)
     const trace = getCurrentTrace()
     const callId = trace?.startLLMCall(trace.getLLMCallCount())
     const startTime = Date.now()
@@ -113,7 +124,6 @@ export class AnthropicProvider implements LLMProvider {
         }
       }
 
-      const nonSystemMessages = this.conversation(request.model, request.messages)
       const rules = anthropicModelRules(request.model)
 
       // Build request params (some models don't support both temperature and top_p)

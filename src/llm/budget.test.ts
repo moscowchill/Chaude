@@ -138,6 +138,13 @@ describe('persistent daily model budget', () => {
       await expect(new DailyBudget(file(), 0.1).complete(p, haiku)).rejects.toThrow('too little')
       expect(p.complete).not.toHaveBeenCalled()
     })
+    it('keeps the long-prompt card when an override changes the base rates', async () => {
+      const usage = { inputTokens: 1000, outputTokens: 100, cacheCreationTokens: 0, cacheReadTokens: 100_000 }
+      const override = { 'claude-haiku-5-5': { input: 0.2, output: 1, cacheWrite: 0.4, cacheRead: 0.02 } }
+      await new DailyBudget(file(), 2, override).complete(used(usage), haiku)
+      // Long-prompt rates as before: 1000 x 0.50 + 100 x 2.50 + 100000 x 0.05
+      expect((await new DailyBudget(file(), 2).status()).usedUsd).toBe(0.00575)
+    })
     it('rejects an invalid long-prompt card', () => {
       const bad = { input: 1, output: 1, cacheWrite: 1, cacheRead: 1 }
       expect(() => new DailyBudget(file(), 2, { m: { ...bad, longPrompt: { ...bad, overTokens: 0 } } })).toThrow(

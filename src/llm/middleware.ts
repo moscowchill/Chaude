@@ -28,6 +28,8 @@ export interface LLMProvider {
   readonly supportedModes: ('prefill' | 'chat')[]
   complete(request: ProviderRequest): Promise<LLMCompletion>
   countInputTokens?(request: ProviderRequest): Promise<number>
+  /** Whether the model accepts an assistant prefill, which prefill mode is built on */
+  supportsPrefill?(model: string): boolean
 }
 
 /** Content block for Anthropic API messages */
@@ -107,6 +109,11 @@ export class LLMMiddleware {
       throw new LLMError(
         `Provider ${provider.name} does not support ${request.config.mode} mode`
       )
+    }
+    // Current Claude models reject an assistant prefill; stripping it would leave
+    // nothing of the conversation, so refuse with a clear message
+    if (request.config.mode === 'prefill' && provider.supportsPrefill?.(request.config.model) === false) {
+      throw new LLMError(`${request.config.model} does not accept an assistant prefill; use mode: chat`)
     }
 
     // Transform to provider format based on mode

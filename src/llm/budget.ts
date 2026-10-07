@@ -67,7 +67,12 @@ export class DailyBudget {
     if (!Number.isFinite(limitUsd) || limitUsd < 0) throw new Error('Invalid DAILY_BUDGET_USD')
     this.limitMicros = Math.floor(limitUsd * 1_000_000)
     if (!Number.isSafeInteger(this.limitMicros)) throw new Error('Invalid DAILY_BUDGET_USD')
-    this.prices = { ...PRICES, ...prices }
+    // An override merges into the built-in entry, so overriding a model's base rates
+    // keeps its long-prompt card
+    this.prices = { ...PRICES }
+    for (const [model, price] of Object.entries(prices)) {
+      this.prices[model] = { ...PRICES[model], ...price }
+    }
     for (const price of Object.values(this.prices)) {
       const long = price.longPrompt
       if (long && (!Number.isSafeInteger(long.overTokens) || long.overTokens <= 0))
