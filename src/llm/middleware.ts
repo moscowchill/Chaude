@@ -15,6 +15,8 @@ import {
   LLMError,
   VendorConfig,
   ToolDefinition,
+  ThinkingMode,
+  Effort,
 } from '../types.js'
 import { DailyBudget } from './budget.js'
 import { logger } from '../utils/logger.js'
@@ -58,6 +60,10 @@ export interface ProviderRequest {
   tools?: AnthropicToolDefinition[]
   presence_penalty?: number
   frequency_penalty?: number
+  /** Anthropic API thinking; unset uses the provider's per-model default */
+  thinking?: ThinkingMode
+  /** Anthropic output_config.effort; unset uses the model's default */
+  effort?: Effort
 }
 
 export interface ProviderMessage {
@@ -566,6 +572,8 @@ export class LLMMiddleware {
       tools: this.formatToolsForApi(request.tools),
       presence_penalty: request.config.presence_penalty,
       frequency_penalty: request.config.frequency_penalty,
+      thinking: request.config.thinking,
+      effort: request.config.effort,
     }
   }
 

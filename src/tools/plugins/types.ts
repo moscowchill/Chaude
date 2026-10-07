@@ -2,7 +2,7 @@
  * Tool Plugin Types
  */
 
-import { ContentBlock } from '../../types.js'
+import { ContentBlock, Effort, StopReason } from '../../types.js'
 import type { StateScope } from './state.js'
 
 export interface ToolPlugin {
@@ -149,6 +149,8 @@ export interface PluginLLMRequest {
   }>
   max_tokens: number
   temperature?: number
+  /** Anthropic output_config.effort for models that support it */
+  effort?: Effort
 }
 
 /**
@@ -156,6 +158,8 @@ export interface PluginLLMRequest {
  */
 export interface PluginLLMResponse {
   text: string
+  /** `max_tokens` means the text was cut off */
+  stopReason?: StopReason
   usage?: {
     inputTokens: number
     outputTokens: number

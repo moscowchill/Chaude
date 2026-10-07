@@ -10,7 +10,12 @@ import { LLMCompletion, ContentBlock, LLMError, TextContent } from '../../types.
 import { logger } from '../../utils/logger.js'
 import { getCurrentTrace } from '../../trace/index.js'
 import { processRequestForLogging } from '../../utils/blob-store.js'
-import { anthropicModelRules } from './anthropic-models.js'
+import { anthropicModelRules, thinkingParam } from './anthropic-models.js'
+
+/** Beta header for `fallbacks: 'default'`: a refused request is answered by a fallback model */
+const SERVER_FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+/** Above this, requests stream: a long non-streaming request can outlast the HTTP timeout */
+const STREAM_ABOVE_MAX_TOKENS = 16_000
 
 // Extended usage type to include cache tokens (not in base Anthropic types)
 interface AnthropicUsageWithCache {
@@ -57,12 +62,28 @@ export class AnthropicProvider implements LLMProvider {
       system: system.length ? system : undefined,
       messages: this.conversation(request.model, request.messages),
       tools: request.tools?.length ? request.tools : undefined,
-      thinking: anthropicModelRules(request.model).thinking,
+      thinking: thinkingParam(anthropicModelRules(request.model), request.thinking),
     }
-    const count = await this.client.beta.messages.countTokens(
-      params as unknown as Parameters<typeof this.client.beta.messages.countTokens>[0]
+    const count = await this.client.messages.countTokens(
+      params as unknown as Anthropic.MessageCountTokensParams
     )
     return count.input_tokens
+  }
+
+  /** Send a request: through the beta endpoint when it needs beta features, streamed when large */
+  private async send(params: Record<string, unknown>, betas: string[]): Promise<Anthropic.Message> {
+    const stream = (params.max_tokens as number) > STREAM_ABOVE_MAX_TOKENS
+    if (betas.length > 0) {
+      const body = { ...params, betas } as unknown as Anthropic.Beta.MessageCreateParamsNonStreaming
+      const message = stream
+        ? await this.client.beta.messages.stream(body).finalMessage()
+        : await this.client.beta.messages.create(body)
+      return message as unknown as Anthropic.Message
+    }
+    const body = params as unknown as Anthropic.MessageCreateParamsNonStreaming
+    return stream
+      ? await this.client.messages.stream(body).finalMessage()
+      : await this.client.messages.create(body)
   }
 
   async complete(request: ProviderRequest): Promise<LLMCompletion> {
@@ -110,8 +131,18 @@ export class AnthropicProvider implements LLMProvider {
       if (temperature !== undefined) {
         params.temperature = temperature
       }
-      if (rules.thinking) {
-        params.thinking = rules.thinking
+      const thinking = thinkingParam(rules, request.thinking)
+      if (thinking) {
+        params.thinking = thinking
+      }
+      if (request.effort && rules.adaptiveThinking) {
+        params.output_config = { effort: request.effort }
+      }
+      // Where available, a server-side fallback model answers a request that a safety
+      // classifier declines (routed by refusal category)
+      const betas = rules.serverFallback ? [SERVER_FALLBACK_BETA] : []
+      if (rules.serverFallback) {
+        params.fallbacks = 'default'
       }
 
       // Add tools if provided
@@ -125,7 +156,7 @@ export class AnthropicProvider implements LLMProvider {
     try {
       logger.debug({ model: request.model, traceId: trace?.getTraceId() }, 'Calling Anthropic API')
 
-      const response = await this.client.messages.create(params as unknown as Anthropic.MessageCreateParams) as Anthropic.Message
+      const response = await this.send(params, betas)
 
       // Log response to file (and get ref for trace)
       const responseRef = this.logResponseToFile(response)
@@ -151,12 +182,14 @@ export class AnthropicProvider implements LLMProvider {
             input: block.input as Record<string, unknown>,
           }]
         }
-        // Reasoning blocks are never part of the reply (the pinned SDK predates their
-        // types, hence the cast). Claude Haiku 5.5 runs with thinking off, so they only
-        // arrive from a model configured without that rule.
-        const type = (block as { type: string }).type
-        if (type === 'thinking' || type === 'redacted_thinking') {
-          return []
+        // Reasoning blocks stay verbatim (signature included, text often empty): a tool
+        // continuation must send them back unmodified. Every reader of the reply takes
+        // only text blocks, so they never reach Discord.
+        if (block.type === 'thinking') {
+          return [{ type: 'thinking' as const, thinking: block.thinking, signature: block.signature }]
+        }
+        if (block.type === 'redacted_thinking') {
+          return [{ type: 'redacted_thinking' as const, data: block.data }]
         }
         // Unknown block type, return as text
         return [{ type: 'text' as const, text: JSON.stringify(block) }]

@@ -11,6 +11,7 @@ import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { LLMMiddleware, ProviderMessage } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, CachedDocument, DiscordMessage, ToolCall, ToolResult, LLMRequest, LLMCompletion, ContentBlock } from '../types.js'
+import type { PluginLLMRequest, PluginLLMResponse } from '../tools/plugins/types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { KnowledgeBase } from '../knowledge/base.js'
 import { BudgetError } from '../llm/budget.js'
@@ -1451,13 +1452,14 @@ export class AgentLoop {
         const messageIds = discordContext.messages.map(m => m.id)
 
         // Create LLM completion wrapper for plugins (provider-agnostic)
-        const llmComplete = async (request: { model: string; messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; [key: string]: unknown }> }>; max_tokens: number; temperature?: number }) => {
+        const llmComplete = async (request: PluginLLMRequest): Promise<PluginLLMResponse> => {
           const completion = await this.llmMiddleware.completeRaw({
             model: request.model,
             messages: request.messages,
             max_tokens: request.max_tokens,
             temperature: request.temperature ?? 0.7,
             top_p: 1,
+            effort: request.effort,
           })
           // Extract text from content blocks
           const text = completion.content
@@ -1466,6 +1468,7 @@ export class AgentLoop {
             .join('')
           return {
             text,
+            stopReason: completion.stopReason,
             usage: completion.usage ? {
               inputTokens: completion.usage.inputTokens,
               outputTokens: completion.usage.outputTokens,
@@ -2342,6 +2345,10 @@ export class AgentLoop {
             description: t.description,
             input_schema: t.inputSchema || { type: 'object', properties: {} },
           })),
+          // Same thinking setting as the first call: the assistant turn above carries its
+          // thinking blocks back unmodified, as the API requires for tool continuations
+          thinking: continuationRequest.config.thinking,
+          effort: continuationRequest.config.effort,
         }
 
         // Call provider directly (bypass middleware transform)

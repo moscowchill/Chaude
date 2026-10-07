@@ -188,3 +188,20 @@ describe('transformToChat prompt caching', () => {
     expect(blocks[blocks.length - 1]!.cache_control).toBeUndefined()
   })
 })
+
+describe('transformToChat thinking settings', () => {
+  it('hands the bot thinking mode and effort to the provider', async () => {
+    const req = await transform({
+      messages: [msg('Alice', 'hi')],
+      config: makeConfig({ model: 'claude-haiku-5-5', thinking: 'adaptive', effort: 'medium' }),
+    })
+    expect(req.thinking).toBe('adaptive')
+    expect(req.effort).toBe('medium')
+  })
+
+  it('leaves both unset when the bot does not choose them', async () => {
+    const req = await transform({ messages: [msg('Alice', 'hi')], config: makeConfig() })
+    expect(req.thinking).toBeUndefined()
+    expect(req.effort).toBeUndefined()
+  })
+})
