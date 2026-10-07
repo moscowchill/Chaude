@@ -188,3 +188,63 @@ describe('transformToChat prompt caching', () => {
     expect(blocks[blocks.length - 1]!.cache_control).toBeUndefined()
   })
 })
+
+describe('transformToChat thinking settings', () => {
+  it('hands the bot thinking mode and effort to the provider', async () => {
+    const req = await transform({
+      messages: [msg('Alice', 'hi')],
+      config: makeConfig({ model: 'claude-haiku-5-5', thinking: 'adaptive', effort: 'medium' }),
+    })
+    expect(req.thinking).toBe('adaptive')
+    expect(req.effort).toBe('medium')
+  })
+
+  it('leaves both unset when the bot does not choose them', async () => {
+    const req = await transform({ messages: [msg('Alice', 'hi')], config: makeConfig() })
+    expect(req.thinking).toBeUndefined()
+    expect(req.effort).toBeUndefined()
+  })
+})
+
+describe('prefill mode on a model without assistant prefill', () => {
+  it('is refused with a clear message before any request', async () => {
+    const middleware = new LLMMiddleware()
+    let called = false
+    const stub: LLMProvider = {
+      name: 'anthropic',
+      supportedModes: ['prefill', 'chat'],
+      supportsPrefill: (model) => model !== 'claude-haiku-5-5',
+      complete: async (req: ProviderRequest): Promise<LLMCompletion> => {
+        called = true
+        return { content: [], stopReason: 'end_turn', usage: { inputTokens: 0, outputTokens: 0 }, model: req.model }
+      },
+    }
+    middleware.registerProvider(stub, 'anthropic')
+    middleware.setVendorConfigs({ anthropic: { provides: ['claude-*'] } } as never)
+    await expect(
+      middleware.complete({ messages: [msg('Alice', 'hi')], config: makeConfig({ model: 'claude-haiku-5-5', mode: 'prefill' }) })
+    ).rejects.toThrow('does not accept an assistant prefill')
+    expect(called).toBe(false)
+  })
+})
+
+describe('buildChatMessages for tool continuations', () => {
+  it('drops a trailing bot turn for a model without prefill, matching the first call', () => {
+    const middleware = new LLMMiddleware()
+    const stub: LLMProvider = {
+      name: 'anthropic',
+      supportedModes: ['prefill', 'chat'],
+      supportsPrefill: (model) => model !== 'claude-haiku-5-5',
+      complete: async (req: ProviderRequest): Promise<LLMCompletion> => ({
+        content: [], stopReason: 'end_turn', usage: { inputTokens: 0, outputTokens: 0 }, model: req.model,
+      }),
+    }
+    middleware.registerProvider(stub, 'anthropic')
+    middleware.setVendorConfigs({ anthropic: { provides: ['claude-*'] } } as never)
+    const conversation = { messages: [msg('Alice', 'hi'), msg('Chaude', 'hello there')] }
+    const haiku55 = middleware.buildChatMessages({ ...conversation, config: makeConfig({ model: 'claude-haiku-5-5' }) })
+    expect(haiku55.at(-1)?.role).toBe('user')
+    const haiku45 = middleware.buildChatMessages({ ...conversation, config: makeConfig() })
+    expect(haiku45.at(-1)?.role).toBe('assistant')
+  })
+})

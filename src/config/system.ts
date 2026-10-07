@@ -273,6 +273,8 @@ export class ConfigSystem {
       top_p: config.top_p ?? 1.0,
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
+      thinking: config.thinking,
+      effort: config.effort,
 
       // Context config
       recency_window_messages: config.recency_window_messages,
@@ -362,6 +364,19 @@ export class ConfigSystem {
 
     if (config.top_p < 0 || config.top_p > 1) {
       throw new ConfigError('top_p must be between 0 and 1')
+    }
+
+    if (config.thinking !== undefined && config.thinking !== 'adaptive' && config.thinking !== 'disabled') {
+      throw new ConfigError('thinking must be adaptive or disabled')
+    }
+
+    if (config.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(config.effort)) {
+      throw new ConfigError('effort must be low, medium, high, xhigh or max')
+    }
+
+    // The API rejects thinking turned off at the two highest effort levels
+    if (config.thinking === 'disabled' && (config.effort === 'xhigh' || config.effort === 'max')) {
+      throw new ConfigError('thinking: disabled needs effort high or below')
     }
   }
 }

@@ -51,15 +51,16 @@ API_PORT=3000
 
 ### 3. Create Bot Configuration
 
-Create `config/bots/your-bot-name.yaml` (see `config/bots/Haiku4.5.yaml` for a full example):
+Create `config/bots/your-bot-name.yaml` (see `config/bots/Chaude.yaml` for a full example):
 
 ```yaml
-name: Haiku4.5  # Name used in LLM context
+name: MyBot  # Name used in LLM context
 
 mode: chat
-continuation_model: claude-haiku-4-5-20251001
-temperature: 0.7
-max_tokens: 8192
+continuation_model: claude-haiku-5-5
+thinking: adaptive  # Optional: Anthropic API thinking (adaptive | disabled)
+effort: medium      # Optional: low | medium | high | xhigh | max
+max_tokens: 8192    # Thinking shares this budget with the reply
 
 recency_window_messages: 400
 recency_window_characters: 100000
@@ -83,6 +84,9 @@ Create `config/shared.yaml` to declare which models each vendor provides. API ke
 vendors:
   anthropic:
     provides:
+      - "claude-haiku-5-*"
+      - "claude-sonnet-5-*"
+      - "claude-opus-5-*"
       - "claude-haiku-4-5-*"
       - "claude-3-5-sonnet-*"
       - "claude-sonnet-4-*"
@@ -144,7 +148,7 @@ npm start
 
 ### Bot Configuration
 
-See `config/bots/Haiku4.5.yaml` for a complete example. Key options:
+See `config/bots/Chaude.yaml` for a complete example. Key options:
 
 ```yaml
 # Identity
@@ -152,8 +156,10 @@ name: BotName  # Name used in LLM context (prefill labels, stop sequences)
 
 # Model
 mode: chat  # or 'prefill' for base models
-continuation_model: claude-haiku-4-5-20251001
-temperature: 0.7
+continuation_model: claude-haiku-5-5
+temperature: 0.7  # Only for models that take it: Claude Haiku 5.5 and other current models accept only their default sampling, and Chaude leaves it out for them
+thinking: adaptive  # Anthropic API thinking: adaptive | disabled (unset: Claude Haiku 5.5 runs with thinking off)
+effort: medium  # Anthropic output_config.effort: low | medium | high | xhigh | max
 max_tokens: 8192
 
 # Context
@@ -179,7 +185,7 @@ reply_on_random: 50  # 1/N chance to randomly reply (0 to disable)
 A bot that monitors GitHub webhooks and dev discussions, taking notes on important decisions:
 
 ```yaml
-name: Haiku4.5
+name: Observer
 
 system_prompt: |
   You are an open source project observer. Your role is to monitor this server for:
@@ -205,8 +211,7 @@ system_prompt: |
   - web_fetch: Read the content of a specific URL
 
 mode: chat
-continuation_model: claude-haiku-4-5-20251001
-temperature: 0.7
+continuation_model: claude-haiku-5-5
 max_tokens: 8192
 tool_plugins: ['notes', 'brave-search']
 reply_on_random: 50
@@ -230,7 +235,7 @@ plugin_config:
   compaction:
     enabled: true
     threshold_percent: 80           # Trigger at 80% of rolling_threshold
-    summary_model: claude-haiku-4-5-20251001  # Fast/cheap model for summaries
+    summary_model: claude-haiku-5-5  # Fast/cheap model for summaries
     max_summaries: 15               # Keep at most 15 summaries
     messages_per_summary: 25        # Summarize in blocks of 25 messages
 ```
@@ -247,18 +252,18 @@ plugin_config:
     inject_into_context: false  # Let compaction handle injection
   compaction:
     enable_selection: true
-    selection_model: claude-haiku-4-5-20251001
+    selection_model: claude-haiku-5-5
     selection_threshold: 5      # Only select if >5 sources
     max_injections: 5           # Inject at most 5 relevant sources
 ```
 
-**Best practice:** Use a powerful model (Sonnet 4) for main responses and a fast model (Haiku 4.5) for background work:
+**Best practice:** Use a stronger model (Sonnet 5.5) for main responses and a fast model (Haiku 5.5) for background work:
 ```yaml
-continuation_model: claude-sonnet-4-20250514  # Main responses
+continuation_model: claude-sonnet-5-5  # Main responses
 plugin_config:
   compaction:
-    summary_model: claude-haiku-4-5-20251001   # Summarization
-    selection_model: claude-haiku-4-5-20251001 # Topic selection
+    summary_model: claude-haiku-5-5   # Summarization
+    selection_model: claude-haiku-5-5 # Topic selection
 ```
 
 ### Discord Commands

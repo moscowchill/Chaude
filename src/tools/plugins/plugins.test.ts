@@ -19,6 +19,7 @@ interface FakeContextOptions {
   initialState?: Record<string, unknown>
   otherPluginState?: Record<string, unknown>
   llmResponse?: string | ((req: PluginLLMRequest) => string)
+  llmStopReason?: PluginLLMResponse['stopReason']
 }
 
 function makeContext(opts: FakeContextOptions = {}) {
@@ -50,7 +51,7 @@ function makeContext(opts: FakeContextOptions = {}) {
       ? async (req: PluginLLMRequest): Promise<PluginLLMResponse> => {
           llmCalls.push(req)
           const text = typeof opts.llmResponse === 'function' ? opts.llmResponse(req) : opts.llmResponse!
-          return { text }
+          return { text, stopReason: opts.llmStopReason ?? 'end_turn' }
         }
       : undefined,
   } as unknown as PluginStateContext
@@ -152,6 +153,70 @@ describe('notes consolidation', () => {
     expect(llmCalls).toHaveLength(0)
     const state = store.get('channel') as { notes: unknown[] }
     expect(state.notes).toHaveLength(6)
+  })
+
+  it('asks Claude Opus 5.5 with room for thinking and the full JSON', async () => {
+    const { context, llmCalls } = makeContext({
+      pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5 },
+      initialState: { notes: [...sixNotes], lastModifiedMessageId: null },
+      llmResponse: '[{"content":"merged note","category":"tasks"}]',
+    })
+
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+
+    expect(llmCalls).toHaveLength(1)
+    expect(llmCalls[0]).toMatchObject({ model: 'claude-opus-5-5', max_tokens: 32_000, effort: 'medium' })
+  })
+
+  it('keeps originals when the reply was cut off at max_tokens, without parsing it', async () => {
+    // Every production consolidation on the old 4096 cap ended this way: valid JSON up
+    // to the cut. A reply that happens to parse must still be refused.
+    const { context, store } = makeContext({
+      pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5 },
+      initialState: { notes: [...sixNotes], lastModifiedMessageId: null },
+      llmResponse: '[{"content":"merged note","category":"tasks"}]',
+      llmStopReason: 'max_tokens',
+    })
+
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+
+    const state = store.get('channel') as { notes: unknown[]; preConsolidationBackup?: unknown }
+    expect(state.notes).toHaveLength(6)
+    expect(state.preConsolidationBackup).toBeUndefined()
+  })
+
+  it.each([
+    ['a reply cut off at max_tokens', 'max_tokens' as const, '[{"content":"merged","category":"tasks"}]'],
+    ['an unparseable reply', 'end_turn' as const, 'sorry, I cannot do that'],
+  ])('waits out the cooldown after %s instead of retrying on the next activation', async (_case, stopReason, reply) => {
+    const { context, store, llmCalls } = makeContext({
+      pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5, consolidation_cooldown_hours: 24 },
+      initialState: { notes: [...sixNotes], lastModifiedMessageId: null },
+      llmResponse: reply,
+      llmStopReason: stopReason,
+    })
+
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+
+    expect(llmCalls).toHaveLength(1)
+    const state = store.get('channel') as { notes: unknown[]; lastConsolidationAttemptAt?: string; lastConsolidationAt?: string }
+    expect(state.lastConsolidationAttemptAt).toBeDefined()
+    expect(state.lastConsolidationAt).toBeUndefined()
+    expect(state.notes).toHaveLength(6)
+  })
+
+  it('stamps no attempt when no cabinet qualifies', async () => {
+    const { context, store, llmCalls } = makeContext({
+      pluginConfig: { consolidation_enabled: true, min_notes_to_consolidate: 5 },
+      initialState: { notes: sixNotes.slice(0, 3), lastModifiedMessageId: null },
+      llmResponse: '[{"content":"merged","category":"tasks"}]',
+    })
+
+    await notesPlugin.onPostActivation!(context, makeActivationResult([]))
+
+    expect(llmCalls).toHaveLength(0)
+    expect((store.get('channel') as { lastConsolidationAttemptAt?: string }).lastConsolidationAttemptAt).toBeUndefined()
   })
 
   it('keeps originals when the LLM returns garbage', async () => {

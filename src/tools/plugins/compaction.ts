@@ -38,7 +38,7 @@ interface CompactionConfig {
   enabled?: boolean
   threshold_percent?: number        // Trigger at this % of rolling_threshold (default: 80)
   threshold_characters?: number     // Also trigger if context exceeds this many chars (default: 0 = disabled)
-  summary_model?: string            // Model for summarization (default: claude-haiku-4-5-20251001)
+  summary_model?: string            // Model for summarization (default: claude-haiku-5-5)
   max_summaries?: number            // Max summaries to keep (default: 15)
   messages_per_summary?: number     // Messages to summarize at once (default: 25)
   // Selection options
@@ -53,11 +53,11 @@ const DEFAULT_CONFIG: Required<CompactionConfig> = {
   enabled: true,
   threshold_percent: 80,
   threshold_characters: 0,          // Disabled by default, set in config for safety net
-  summary_model: 'claude-haiku-4-5-20251001',
+  summary_model: 'claude-haiku-5-5',
   max_summaries: 15,
   messages_per_summary: 25,
   enable_selection: true,
-  selection_model: 'claude-haiku-4-5-20251001',
+  selection_model: 'claude-haiku-5-5',
   selection_threshold: 5,
   max_injections: 5,
   max_cabinet_selections: 3,

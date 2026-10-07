@@ -4,6 +4,7 @@ import { atomicJson, SerialQueue } from '../utils/atomic-state.js'
 import type { LLMCompletion } from '../types.js'
 import type { LLMProvider, ProviderRequest } from './middleware.js'
 import { llmErrorStatus } from '../utils/retry.js'
+import { logger } from '../utils/logger.js'
 
 export class BudgetError extends Error {}
 export interface RateCard {
@@ -29,7 +30,14 @@ const PRICES: Record<string, ModelPrice> = {
   },
   'claude-haiku-4-5-20251001': { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.1 },
   'claude-haiku-4-5': { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.1 },
+  'claude-opus-5-5': { input: 4, output: 20, cacheWrite: 8, cacheRead: 0.2 },
+  // Opus 4.8 and 4.7 can answer an Opus 5.5 request through the server-side fallback
+  'claude-opus-4-8': { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.5 },
+  'claude-opus-4-7': { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.5 },
   'claude-opus-4-6': { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.5 },
+  // The pricing page lists Sonnet 5.5 cache reads at $0.20 in its table and $0.10 in its
+  // caching section; the guard reserves the higher figure
+  'claude-sonnet-5-5': { input: 2, output: 10, cacheWrite: 4, cacheRead: 0.2 },
   'claude-sonnet-4-6': { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.3 }
 }
 /** The rates that apply to a prompt of `promptTokens` input tokens */
@@ -60,7 +68,12 @@ export class DailyBudget {
     if (!Number.isFinite(limitUsd) || limitUsd < 0) throw new Error('Invalid DAILY_BUDGET_USD')
     this.limitMicros = Math.floor(limitUsd * 1_000_000)
     if (!Number.isSafeInteger(this.limitMicros)) throw new Error('Invalid DAILY_BUDGET_USD')
-    this.prices = { ...PRICES, ...prices }
+    // An override merges into the built-in entry, so overriding a model's base rates
+    // keeps its long-prompt card
+    this.prices = { ...PRICES }
+    for (const [model, price] of Object.entries(prices)) {
+      this.prices[model] = { ...PRICES[model], ...price }
+    }
     for (const price of Object.values(this.prices)) {
       const long = price.longPrompt
       if (long && (!Number.isSafeInteger(long.overTokens) || long.overTokens <= 0))
@@ -184,8 +197,20 @@ export class DailyBudget {
         usage.cacheReadTokens || 0
       ].every((n) => Number.isSafeInteger(n) && n >= 0)
     ) {
+      // A server-side fallback can answer with another model: charge what answered
+      // when its price is known
+      const answered =
+        completion.model && Object.hasOwn(this.prices, completion.model)
+          ? this.prices[completion.model]
+          : price
+      if (completion.model && completion.model !== request.model && !Object.hasOwn(this.prices, completion.model)) {
+        logger.warn(
+          { requested: request.model, answered: completion.model },
+          'Answering model has no price entry: charged at the requested model price'
+        )
+      }
       const rates = rateCard(
-        price,
+        answered ?? price,
         usage.inputTokens + (usage.cacheCreationTokens || 0) + (usage.cacheReadTokens || 0)
       )
       const cost = Math.ceil(

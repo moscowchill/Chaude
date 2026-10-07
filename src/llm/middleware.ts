@@ -15,6 +15,8 @@ import {
   LLMError,
   VendorConfig,
   ToolDefinition,
+  ThinkingMode,
+  Effort,
 } from '../types.js'
 import { DailyBudget } from './budget.js'
 import { logger } from '../utils/logger.js'
@@ -26,6 +28,8 @@ export interface LLMProvider {
   readonly supportedModes: ('prefill' | 'chat')[]
   complete(request: ProviderRequest): Promise<LLMCompletion>
   countInputTokens?(request: ProviderRequest): Promise<number>
+  /** Whether the model accepts an assistant prefill, which prefill mode is built on */
+  supportsPrefill?(model: string): boolean
 }
 
 /** Content block for Anthropic API messages */
@@ -58,6 +62,10 @@ export interface ProviderRequest {
   tools?: AnthropicToolDefinition[]
   presence_penalty?: number
   frequency_penalty?: number
+  /** Anthropic API thinking; unset uses the provider's per-model default */
+  thinking?: ThinkingMode
+  /** Anthropic output_config.effort; unset uses the model's default */
+  effort?: Effort
 }
 
 export interface ProviderMessage {
@@ -101,6 +109,11 @@ export class LLMMiddleware {
       throw new LLMError(
         `Provider ${provider.name} does not support ${request.config.mode} mode`
       )
+    }
+    // Current Claude models reject an assistant prefill; stripping it would leave
+    // nothing of the conversation, so refuse with a clear message
+    if (request.config.mode === 'prefill' && provider.supportsPrefill?.(request.config.model) === false) {
+      throw new LLMError(`${request.config.model} does not accept an assistant prefill; use mode: chat`)
     }
 
     // Transform to provider format based on mode
@@ -433,7 +446,13 @@ export class LLMMiddleware {
    * would drop cache_control blocks and produce a different byte prefix.
    */
   buildChatMessages(request: LLMRequest): ProviderMessage[] {
-    return this.transformToChat(request).messages
+    const messages = this.transformToChat(request).messages
+    // Match what the first call sent: for a model without assistant prefill the provider
+    // dropped trailing assistant turns, and the continuation appends to that same prefix
+    if (this.selectProvider(request.config.model).supportsPrefill?.(request.config.model) === false) {
+      while (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant') messages.pop()
+    }
+    return messages
   }
 
   private transformToChat(request: LLMRequest, _provider?: LLMProvider): ProviderRequest {
@@ -566,6 +585,8 @@ export class LLMMiddleware {
       tools: this.formatToolsForApi(request.tools),
       presence_penalty: request.config.presence_penalty,
       frequency_penalty: request.config.frequency_penalty,
+      thinking: request.config.thinking,
+      effort: request.config.effort,
     }
   }
 
