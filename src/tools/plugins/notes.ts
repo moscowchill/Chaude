@@ -36,7 +36,7 @@ interface NotesConfig {
    *  cooldown has elapsed - the exact-hour gate meant a bot with a few activations
    *  per day would essentially never consolidate. */
   consolidation_time?: string
-  consolidation_model?: string             // Model for consolidation (default: claude-opus-4-6)
+  consolidation_model?: string             // Model for consolidation (default: claude-opus-5-5)
   consolidation_cooldown_hours?: number    // Min hours between runs (default: 24)
   min_notes_to_consolidate?: number        // Min notes in a cabinet to trigger (default: 5)
 }
@@ -385,7 +385,7 @@ const plugin: ToolPlugin = {
     }
 
     const minNotes = config.min_notes_to_consolidate ?? 5
-    const model = config.consolidation_model || 'claude-opus-4-6'
+    const model = config.consolidation_model || 'claude-opus-5-5'
 
     // Group notes by cabinet
     const cabinets = new Map<string, Note[]>()
@@ -432,6 +432,9 @@ const plugin: ToolPlugin = {
   },
 }
 
+/** Room for thinking plus a JSON array that restates every kept note (streams in the provider) */
+const CONSOLIDATION_MAX_TOKENS = 32_000
+
 /**
  * Consolidate a cabinet of notes using an LLM.
  * Identifies duplicates, merges overlapping notes, preserves all unique information.
@@ -471,11 +474,20 @@ Aim to significantly reduce the note count while preserving all unique informati
 Respond with ONLY the JSON array, no other text.`
 
   try {
+    // The reply restates every note it keeps, and on Claude Opus 5.5 thinking shares the
+    // budget. At 4096 every production consolidation was cut off mid-JSON and failed.
     const response = await context.llmComplete({
       model,
-      max_tokens: 4096,
+      max_tokens: CONSOLIDATION_MAX_TOKENS,
+      effort: 'medium',
       messages: [{ role: 'user', content: prompt }],
     })
+
+    if (response.stopReason === 'max_tokens') {
+      logger.warn({ category, notes: notes.length, maxTokens: CONSOLIDATION_MAX_TOKENS },
+        'Consolidation reply was cut off at max_tokens - keeping originals')
+      return null
+    }
 
     const text = response.text.trim()
     const jsonStr = text.replace(/^```json?\s*|\s*```$/g, '').trim()

@@ -22,9 +22,11 @@ system_prompt: |
 
 # Model configuration
 mode: chat
-continuation_model: claude-haiku-5-5 # Fast and cheap; runs with thinking off (src/llm/providers/anthropic-models.ts)
+continuation_model: claude-haiku-5-5 # Fast and cheap
 # No temperature: Claude Haiku 5.5 accepts only its default sampling
-max_tokens: 4096
+thinking: adaptive # The model decides when a reply needs reasoning; thinking is never posted
+effort: medium # Claude Haiku 5.5's default: thinks on hard questions, skips it on small talk
+max_tokens: 8192 # Thinking shares this budget with the reply
 
 # Context configuration (Claude Haiku 5.5 counts ~30% more tokens per character than Haiku 4.5)
 recency_window_messages: 25
@@ -52,7 +54,7 @@ plugin_config:
     # Daily consolidation: deduplicates and merges notes using a strong model
     consolidation_enabled: true
     consolidation_time: "4" # UTC hour (0-23) to run consolidation
-    consolidation_model: claude-opus-4-6 # Use the beefiest model for quality merging
+    consolidation_model: claude-opus-5-5 # Current Opus for careful merging; cheaper than Opus 4.6
     consolidation_cooldown_hours: 72 # Every 3 days
     min_notes_to_consolidate: 5 # Only consolidate cabinets with 5+ notes
   # Compaction: auto-summarizes old context + intelligently selects what to inject

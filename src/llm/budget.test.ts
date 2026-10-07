@@ -149,3 +149,31 @@ describe('persistent daily model budget', () => {
     })
   })
 })
+
+describe('Claude Opus 5.5 and its server-side fallback', () => {
+  const opus = { ...request, model: 'claude-opus-5-5' }
+  function answeredBy(model: string): LLMProvider {
+    const p = provider()
+    p.complete = vi.fn().mockResolvedValue({
+      content: [],
+      stopReason: 'end_turn',
+      model,
+      usage: { inputTokens: 1000, outputTokens: 100 }
+    })
+    return p
+  }
+  it('charges Claude Opus 5.5 at its own rates', async () => {
+    await new DailyBudget(file(), 2).complete(answeredBy('claude-opus-5-5'), opus)
+    // 1000 x 4 + 100 x 20 micro-dollars
+    expect((await new DailyBudget(file(), 2).status()).usedUsd).toBe(0.006)
+  })
+  it('charges the model that answered after a fallback', async () => {
+    await new DailyBudget(file(), 2).complete(answeredBy('claude-opus-4-8'), opus)
+    // 1000 x 5 + 100 x 25 micro-dollars
+    expect((await new DailyBudget(file(), 2).status()).usedUsd).toBe(0.0075)
+  })
+  it('keeps the requested model price when the answering model has none', async () => {
+    await new DailyBudget(file(), 2).complete(answeredBy('claude-unpriced'), opus)
+    expect((await new DailyBudget(file(), 2).status()).usedUsd).toBe(0.006)
+  })
+})
