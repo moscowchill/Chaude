@@ -2,7 +2,7 @@
  * Tool Plugin Types
  */
 
-import { ContentBlock, Effort, StopReason } from '../../types.js'
+import { ContentBlock, Effort, StopReason, ThinkingMode } from '../../types.js'
 import type { StateScope } from './state.js'
 
 export interface ToolPlugin {
@@ -151,6 +151,8 @@ export interface PluginLLMRequest {
   temperature?: number
   /** Anthropic output_config.effort for models that support it */
   effort?: Effort
+  /** Anthropic API thinking; unset uses the provider's per-model default */
+  thinking?: ThinkingMode
 }
 
 /**

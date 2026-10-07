@@ -160,6 +160,17 @@ describe('Anthropic provider with Claude Opus 5.5', () => {
   })
 })
 
+describe('Anthropic provider with Claude Opus 4.6', () => {
+  it('sends the temperature without thinking and drops it with thinking on', async () => {
+    await new AnthropicProvider('key').complete(request('claude-opus-4-6'))
+    expect(sdk.stream.mock.calls[0][0].temperature).toBe(0.7)
+    await new AnthropicProvider('key').complete(request('claude-opus-4-6', { thinking: 'adaptive' }))
+    const params = sdk.stream.mock.calls[1][0]
+    expect(params.thinking).toEqual({ type: 'adaptive' })
+    expect(params).not.toHaveProperty('temperature')
+  })
+})
+
 describe('Anthropic provider with Claude Haiku 4.5', () => {
   it('keeps the temperature and prefill, and ignores thinking settings it cannot take', async () => {
     const withPrefill: ProviderMessage[] = [...chat, { role: 'assistant', content: 'Chaude:' }]

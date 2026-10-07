@@ -1460,6 +1460,7 @@ export class AgentLoop {
             temperature: request.temperature ?? 0.7,
             top_p: 1,
             effort: request.effort,
+            thinking: request.thinking,
           })
           // Extract text from content blocks
           const text = completion.content

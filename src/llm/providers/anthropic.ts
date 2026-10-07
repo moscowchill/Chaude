@@ -132,12 +132,13 @@ export class AnthropicProvider implements LLMProvider {
       }
 
       // Only include temperature (not top_p) to avoid API errors with newer models.
-      // Models that accept only the default sampling get no temperature at all.
-      const temperature = rules.samplingParams ? request.temperature : undefined
+      // Models that accept only the default sampling get no temperature at all, and
+      // neither does a request with thinking on (the API accepts only 1 there).
+      const thinking = thinkingParam(rules, request.thinking)
+      const temperature = rules.samplingParams && thinking?.type !== 'adaptive' ? request.temperature : undefined
       if (temperature !== undefined) {
         params.temperature = temperature
       }
-      const thinking = thinkingParam(rules, request.thinking)
       if (thinking) {
         params.thinking = thinking
       }
