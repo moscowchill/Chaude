@@ -248,3 +248,66 @@ describe('buildChatMessages for tool continuations', () => {
     expect(haiku45.at(-1)?.role).toBe('assistant')
   })
 })
+
+describe('transformToChat date lines', () => {
+  const at = (participant: string, text: string, iso: string): ParticipantMessage => ({
+    ...msg(participant, text),
+    timestamp: new Date(iso),
+  })
+
+  it('marks the first message of each day, so a days-old backlog reads as history', async () => {
+    const req = await transform({
+      messages: [
+        at('alice', 're: NEAR situation', '2026-10-03T19:49:00Z'),
+        at('bob', 'audits are not perfect', '2026-10-03T19:50:00Z'),
+        at('alice', 'https://x.com/some/post', '2026-10-05T13:46:00Z'),
+        at('moscowchill', '@Chaude hello', '2026-10-07T21:28:00Z'),
+      ],
+      config: makeConfig(),
+    })
+    expect(req.messages.at(-1)?.content).toBe(
+      '[Saturday 3 October 2026]\nalice: re: NEAR situation\nbob: audits are not perfect\n' +
+        '[Monday 5 October 2026]\nalice: https://x.com/some/post\n' +
+        '[Wednesday 7 October 2026]\nmoscowchill: @Chaude hello'
+    )
+  })
+
+  it('carries a day change on a bot turn to the next user message, and never dates bot turns', async () => {
+    const req = await transform({
+      messages: [
+        at('alice', 'first', '2026-10-05T10:00:00Z'),
+        at('Chaude', 'reply', '2026-10-07T09:00:00Z'),
+        at('alice', 'second', '2026-10-07T09:05:00Z'),
+      ],
+      config: makeConfig(),
+    })
+    expect(req.messages.map(m => m.content)).toEqual([
+      '[Monday 5 October 2026]\nalice: first',
+      'reply',
+      '[Wednesday 7 October 2026]\nalice: second',
+    ])
+  })
+
+  it('dates the first message with text, so an image-only post followed by a bot turn loses no line', async () => {
+    const image: ParticipantMessage = {
+      participant: 'alice',
+      content: [{ type: 'image', source: { type: 'base64', data: 'aGk=', media_type: 'image/png' } }],
+      timestamp: new Date('2026-10-07T09:00:00Z'),
+    }
+    const req = await transform({
+      messages: [
+        at('alice', 'old thread', '2026-10-03T10:00:00Z'),
+        image,
+        at('Chaude', 'nice pic', '2026-10-07T09:01:00Z'),
+        at('alice', '@Chaude what do you think?', '2026-10-07T09:05:00Z'),
+      ],
+      config: makeConfig(),
+    })
+    expect(req.messages.at(-1)?.content).toBe('[Wednesday 7 October 2026]\nalice: @Chaude what do you think?')
+  })
+
+  it('adds no date lines when messages carry no timestamps', async () => {
+    const req = await transform({ messages: [msg('alice', 'hi'), msg('bob', 'yo')], config: makeConfig() })
+    expect(req.messages.at(-1)?.content).toBe('alice: hi\nbob: yo')
+  })
+})
