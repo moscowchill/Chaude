@@ -21,7 +21,7 @@ import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
 import { installControls, type ControlsOptions } from './controls.js'
 import { canImportHistory, historyAuthor } from './history-access.js'
-import type { IncomingDirectMessage, OutreachDiscord } from './outreach.js'
+import type { ChannelReply, IncomingDirectMessage, OutreachDiscord } from './outreach.js'
 import { createOutreachDiscord } from './outreach-discord.js'
 import { WelcomeService, type WelcomeConfig } from './welcome.js'
 
@@ -89,6 +89,7 @@ export class DiscordConnector {
   private client: Client
   private welcomeService?: WelcomeService
   private directMessageHandler?: (message: IncomingDirectMessage) => void
+  private channelReplyHandler?: (reply: ChannelReply) => boolean
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
   async installControls(options: ControlsOptions): Promise<void> {
@@ -103,6 +104,11 @@ export class DiscordConnector {
   /** Receives direct messages from users; needs the `directMessages` option */
   setDirectMessageHandler(handler: (message: IncomingDirectMessage) => void): void {
     this.directMessageHandler = handler
+  }
+
+  /** Sees replies in server channels first; a reply it returns true for skips the agent loop */
+  setChannelReplyHandler(handler: (reply: ChannelReply) => boolean): void {
+    this.channelReplyHandler = handler
   }
 
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
@@ -1553,6 +1559,23 @@ export class DiscordConnector {
             attachments: [...message.attachments.values()].map((attachment) => attachment.url),
           })
         }
+        return
+      }
+      // A "stop" in reply to a member-outreach question ends outreach and gets no chat reply
+      const replyToId = message.reference?.messageId
+      if (
+        replyToId &&
+        !message.author.bot &&
+        this.channelReplyHandler?.({
+          id: message.id,
+          channelId: message.channelId,
+          authorId: message.author.id,
+          authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
+          authorUsername: message.author.username,
+          content: message.content,
+          replyToId,
+        })
+      ) {
         return
       }
       logger.debug(

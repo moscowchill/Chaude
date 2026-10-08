@@ -32,6 +32,7 @@ const channelId = '66666666666666666'
 const devChannelId = '67000000000000001'
 /** A channel members talk in that the bot may not post in */
 const quietChannelId = '67000000000000002'
+const newsChannelId = '67000000000000003'
 const triggerId = '77777777777777777'
 const dmChannelId = '88888888888888888'
 const HOUR = 60 * 60 * 1000
@@ -61,6 +62,7 @@ const config = (env: Record<string, string> = {}) =>
 function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
   const sent: Array<{ userId: string; content: string }> = []
   const posts: Array<{ channelId: string; content: string; mentionUserId: string }> = []
+  const replies: Array<{ channelId: string; messageId: string; content: string }> = []
   const reactions: string[] = []
   const discord: OutreachDiscord = {
     guildName: async () => 'Test Server',
@@ -81,9 +83,14 @@ function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
       [
         { id: channelId, name: 'general' },
         { id: devChannelId, name: 'dev' },
+        { id: newsChannelId, name: 'news', announcement: true },
       ].filter((c) => name.trim() === `<#${c.id}>` || name.replace(/^#/, '').toLowerCase() === c.name),
     sendToChannel: async (channelId, content, mentionUserId) => {
       posts.push({ channelId, content, mentionUserId })
+      return [`9200000000000000${posts.length}`]
+    },
+    replyInChannel: async (channelId, messageId, content) => {
+      replies.push({ channelId, messageId, content })
     },
     canSee: async () => true,
     react: async (_channel, messageId, emoji) => {
@@ -91,7 +98,7 @@ function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
     },
     ...overrides,
   }
-  return { discord, sent, posts, reactions }
+  return { discord, sent, posts, replies, reactions }
 }
 
 function fakeModel(...replies: Array<Record<string, unknown>>) {
@@ -431,6 +438,18 @@ describe('owner requests by DM', () => {
       },
     ])
     expect(savedState().threads[memberId]).toBeUndefined()
+    // A "stop" reply to the owner's channel question opts out too
+    expect(
+      outreach.onChannelReply({
+        id: '93000000000000002',
+        channelId,
+        authorId: memberId,
+        authorName: 'Builder',
+        authorUsername: 'builder',
+        content: 'stop',
+        replyToId: '92000000000000001',
+      })
+    ).toBe(true)
   })
 
   it('find a member by a display name seen only in recent public messages', async () => {
@@ -882,6 +901,57 @@ describe('automatic questions', () => {
 
     expect(complete).toHaveBeenCalledTimes(3)
     expect(sent).toEqual([])
+  })
+
+  it('skip announcement channels and channels the member can no longer see', async () => {
+    const { discord, posts } = fakeDiscord({
+      publicMessages: async () => [
+        ...talk(memberId, 4, T0 - DAY, false, { id: newsChannelId, name: 'news' }),
+        ...talk(memberId, 3, T0 - DAY, false, { id: channelId, name: 'general' }),
+        ...talk(memberId, 2, T0 - HOUR),
+      ],
+      canSee: async (id) => id !== channelId,
+    })
+    const complete = fakeModel({ ask: true, channel: 'news', topic: 'the indexer', message: 'How is it going?' })
+    await service({ discord, complete }).tick()
+    expect(posts.map((post) => post.channelId)).toEqual([devChannelId])
+  })
+
+  it('let the member opt out by replying "stop" to the question in the channel', async () => {
+    const { discord, sent, posts, replies } = fakeDiscord({
+      publicMessages: async () => talk(memberId, 6, T0 - HOUR),
+    })
+    const complete = fakeModel({ ask: true, channel: 'dev', topic: 'the indexer', message: 'How is it going?' })
+    const outreach = service({ discord, complete })
+    await outreach.tick()
+    expect(posts).toHaveLength(1)
+    const postId = '92000000000000001'
+    const reply = (authorId: string, content: string, replyToId = postId) => ({
+      id: '93000000000000001',
+      channelId: devChannelId,
+      authorId,
+      authorName: members[authorId]!.name,
+      authorUsername: members[authorId]!.username,
+      content,
+      replyToId,
+    })
+
+    // An answer, someone else's "stop" and a reply to another message stay normal chat
+    expect(outreach.onChannelReply(reply(memberId, 'Going well, shipping Friday.'))).toBe(false)
+    expect(outreach.onChannelReply(reply(otherId, 'stop'))).toBe(false)
+    expect(outreach.onChannelReply(reply(memberId, 'stop', '92000000000000099'))).toBe(false)
+
+    expect(outreach.onChannelReply(reply(memberId, 'please stop pinging me'))).toBe(true)
+    await outreach.idle()
+    expect(replies).toEqual([
+      { channelId: devChannelId, messageId: '93000000000000001', content: "Got it, I won't ask you again." },
+    ])
+    expect(sent.at(-1)).toEqual({
+      userId: ownerId,
+      content:
+        "**Builder** (`@builder`) asked not to be asked again, so I won't contact them. They wrote:\n> please stop pinging me",
+    })
+    expect(savedState().optedOut[memberId]).toBe(T0)
   })
 
   it('count the question before sending, so a failed send means no second one that day', async () => {

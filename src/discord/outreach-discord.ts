@@ -103,7 +103,11 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
               .permissionsFor(me)
               .has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])
         )
-        .map((channel) => ({ id: channel.id, name: channel.name }))
+        .map((channel) => ({
+          id: channel.id,
+          name: channel.name,
+          announcement: channel.type === ChannelType.GuildAnnouncement,
+        }))
     },
 
     async canSee(channelId, userId) {
@@ -118,14 +122,27 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
       if (!channel?.isTextBased() || channel.isDMBased()) {
         throw new Error('Outreach can only post in a server text channel')
       }
+      const ids: string[] = []
       for (const [index, part] of splitMessage(content).entries()) {
-        await channel.send({
+        const sent = await channel.send({
           content: part,
           allowedMentions: { parse: [], users: [mentionUserId] },
           nonce: `${nonce}${index}`.slice(0, 25),
           enforceNonce: true,
         })
+        ids.push(sent.id)
       }
+      return ids
+    },
+
+    async replyInChannel(channelId, messageId, content) {
+      const channel = await client.channels.fetch(channelId)
+      if (!channel?.isTextBased() || channel.isDMBased()) return
+      await channel.send({
+        content,
+        reply: { messageReference: messageId, failIfNotExists: false },
+        allowedMentions: { parse: [], repliedUser: false },
+      })
     },
 
     async message(channelId, messageId) {

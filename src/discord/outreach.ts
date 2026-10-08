@@ -145,8 +145,10 @@ export interface OutreachDiscord {
   findMembers(guildId: string, query: string): Promise<OutreachMember[]>
   /** Text channels the bot can post in, matched by name (case and symbols ignored) or <#id> */
   channels(guildId: string, name: string): Promise<OutreachChannel[]>
-  /** Posts in a server channel, pinging only `mentionUserId` */
-  sendToChannel(channelId: string, content: string, mentionUserId: string, nonce: string): Promise<void>
+  /** Posts in a server channel, pinging only `mentionUserId`; returns the posted message IDs */
+  sendToChannel(channelId: string, content: string, mentionUserId: string, nonce: string): Promise<string[]>
+  /** Replies to a message in a server channel without pinging anyone */
+  replyInChannel(channelId: string, messageId: string, content: string): Promise<void>
   /** Whether a member can view a channel, so a mention there reaches them */
   canSee(channelId: string, userId: string): Promise<boolean>
   /** Author, text, and mentioned or replied-to users of a server message, read from Discord */
@@ -173,6 +175,19 @@ export interface OutreachDiscord {
 export interface OutreachChannel {
   id: string
   name: string
+  /** Announcement channels take owner requests only, never automatic pings */
+  announcement?: boolean
+}
+
+/** A server message that replies to another message */
+export interface ChannelReply {
+  id: string
+  channelId: string
+  authorId: string
+  authorName: string
+  authorUsername: string
+  content: string
+  replyToId: string
 }
 
 export class DirectMessagesClosedError extends Error {
@@ -206,10 +221,31 @@ interface OutreachState {
   autoReplies: Record<string, number>
   /** When each member last got an automatic question in a channel (for the cooldown) */
   lastAsked: Record<string, number>
+  /** Questions posted in channels, by message ID, so a "stop" reply to one opts out */
+  posts: Record<string, ChannelPost>
 }
 
-/** State files written before automatic questions moved to channels have no `lastAsked` */
-type StoredState = Omit<OutreachState, 'lastAsked'> & { lastAsked?: Record<string, number> }
+interface ChannelPost {
+  userId: string
+  channelId: string
+  at: number
+}
+
+/** State files written before questions moved to channels have no `lastAsked` or `posts` */
+type StoredState = Omit<OutreachState, 'lastAsked' | 'posts'> & {
+  lastAsked?: Record<string, number>
+  posts?: Record<string, ChannelPost>
+}
+
+function isPost(value: unknown): value is ChannelPost {
+  return (
+    isRecord(value) &&
+    typeof value.userId === 'string' &&
+    SNOWFLAKE.test(value.userId) &&
+    typeof value.channelId === 'string' &&
+    isTime(value.at)
+  )
+}
 
 const emptyState = (): OutreachState => ({
   day: '',
@@ -220,6 +256,7 @@ const emptyState = (): OutreachState => ({
   dmsClosed: {},
   autoReplies: {},
   lastAsked: {},
+  posts: {},
 })
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -257,7 +294,9 @@ function isState(value: unknown): value is StoredState {
     isTimes(value.optedOut) &&
     isTimes(value.dmsClosed) &&
     isTimes(value.autoReplies) &&
-    (value.lastAsked === undefined || isTimes(value.lastAsked))
+    (value.lastAsked === undefined || isTimes(value.lastAsked)) &&
+    (value.posts === undefined ||
+      (isRecord(value.posts) && Object.values(value.posts).every(isPost)))
   )
 }
 
@@ -519,7 +558,7 @@ export class OutreachService {
       if (existsSync(this.config.statePath)) {
         const stored: unknown = JSON.parse(readFileSync(this.config.statePath, 'utf8'))
         if (!isState(stored)) throw new Error('Invalid member outreach state')
-        this.state = { ...stored, lastAsked: stored.lastAsked ?? {} }
+        this.state = { ...stored, lastAsked: stored.lastAsked ?? {}, posts: stored.posts ?? {} }
       }
     } catch (error) {
       // Without the saved opt-outs and cooldowns nobody can be messaged safely
@@ -591,6 +630,20 @@ export class OutreachService {
     void this.run(() => this.handleReplies(entry.messages)).catch((error: unknown) => {
       logger.error({ err: error, userId }, 'Direct message handling failed')
     })
+  }
+
+  /**
+   * A reply in a server channel, before the agent loop sees it. Returns true when it was a
+   * "stop" from the member a question was posted to, which ends outreach to them.
+   */
+  onChannelReply(reply: ChannelReply): boolean {
+    if (!this.stateAvailable) return false
+    const post = this.state.posts[reply.replyToId]
+    if (!post || post.userId !== reply.authorId || !asksToStop(reply.content)) return false
+    void this.run(() => this.optOutInChannel(reply)).catch((error: unknown) => {
+      logger.error({ err: error, userId: reply.authorId }, 'Channel opt-out failed')
+    })
+    return true
   }
 
   /** Sends an automatic question when one is due */
@@ -725,12 +778,13 @@ export class OutreachService {
     const text = cleanDraft(draft?.message)
     if (!text) return 'The drafted question was unusable (empty, too long, or with links or mentions). Nothing was sent.'
     const now = this.now()
-    await this.discord.sendToChannel(
+    const ids = await this.discord.sendToChannel(
       channel.id,
       `<@${target.id}> ${text}`,
       target.id,
       nonceFor(channel.id, target.id, now, text)
     )
+    this.recordPosts(ids, target.id, channel.id, now)
     logger.info({ userId: target.id, channelId: channel.id }, 'Asked a member in a channel for the owner')
     return `Asked ${who(target.name, target.username)} in #${channel.name}: "${text}"`
   }
@@ -1005,6 +1059,20 @@ export class OutreachService {
     }
   }
 
+  private async optOutInChannel(reply: ChannelReply): Promise<void> {
+    this.state.optedOut[reply.authorId] = this.now()
+    const thread = this.state.threads[reply.authorId]
+    if (thread) thread.status = 'done'
+    this.save()
+    await this.discord
+      .replyInChannel(reply.channelId, reply.id, "Got it, I won't ask you again.")
+      .catch((error: unknown) => logger.warn({ err: error }, 'Could not confirm an opt-out in the channel'))
+    await this.relay(
+      `${who(reply.authorName, reply.authorUsername)} asked not to be asked again, so I won't contact them. They wrote:\n${quote(reply.content)}`
+    )
+    logger.info({ userId: reply.authorId }, 'Member opted out of outreach in a channel')
+  }
+
   /** `text` is relayed to the owner along with the notice; undefined means the owner isn't told */
   private async optOut(userId: string, label: string, text: string | undefined): Promise<void> {
     this.state.optedOut[userId] = this.now()
@@ -1088,8 +1156,12 @@ export class OutreachService {
         ...theirs.filter((c) => normalizedName(c.name) === picked),
         ...theirs.filter((c) => normalizedName(c.name) !== picked),
       ]) {
-        ;[channel] = await this.discord.channels(this.config.guildId, `<#${option.id}>`)
-        if (channel) break
+        const [found] = await this.discord.channels(this.config.guildId, `<#${option.id}>`)
+        // Announcement channels aren't for conversation, and a role change may hide a channel
+        if (found && !found.announcement && (await this.discord.canSee(found.id, member.id))) {
+          channel = found
+          break
+        }
       }
       if (!channel) {
         logger.info({ userId: member.id }, 'No channel to ask this member in')
@@ -1100,12 +1172,13 @@ export class OutreachService {
       automatic.sent++
       this.state.lastAsked[member.id] = now
       this.save()
-      await this.discord.sendToChannel(
+      const ids = await this.discord.sendToChannel(
         channel.id,
         `<@${member.id}> ${text}`,
         member.id,
         nonceFor(channel.id, member.id, now, text)
       )
+      this.recordPosts(ids, member.id, channel.id, now)
       automatic.nextAt =
         automatic.sent < this.config.dailyLimit ? this.later(now, 2 * HOUR_MS) : null
       this.save()
@@ -1119,6 +1192,11 @@ export class OutreachService {
       )
       return
     }
+  }
+
+  private recordPosts(ids: string[], userId: string, channelId: string, at: number): void {
+    for (const id of ids) this.state.posts[id] = { userId, channelId, at }
+    this.save()
   }
 
   private async draft(
@@ -1213,6 +1291,9 @@ export class OutreachService {
     }
     for (const [userId, at] of Object.entries(this.state.lastAsked)) {
       if (now - at > retention) delete this.state.lastAsked[userId]
+    }
+    for (const [messageId, post] of Object.entries(this.state.posts)) {
+      if (now - post.at > retention) delete this.state.posts[messageId]
     }
     for (const [userId, at] of Object.entries(this.state.autoReplies)) {
       if (now - at > DAY_MS) delete this.state.autoReplies[userId]
