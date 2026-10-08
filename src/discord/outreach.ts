@@ -38,10 +38,11 @@ const TICK_MS = 10 * MINUTE_MS
 const MAX_DRAFT_LENGTH = 1000
 const MAX_REPLY_INPUT = 4000
 /** Ways of saying "don't message me". A false match only ends the bot's messages, and
- * the member's text still reaches the owner. */
+ * the member's text still reaches the owner. Messages read together are joined by line
+ * breaks, so the line-anchored patterns check each message. */
 const STOP = [
-  /^\s*(?:please\s+)?(?:stop|unsubscribe|opt[\s-]?out|remove me)\b/i,
-  /(?:^|[,.;!]\s*)(?:please\s+)?stop(?:\s+(?:it|now|please))?[\s.!]*$/i,
+  /^\s*(?:(?:please|pls|plz)\s+)?(?:stop|unsub(?:scribe)?|opt[\s-]?out|remove me|go away)\b/im,
+  /(?:^|[,.;!]\s*)(?:(?:please|pls|plz)\s+)?stop(?:\s+(?:it|now|please|pls))?[\s.!]*$/im,
   /\b(?:don'?t|do not|never|stop|quit)\s+(?:messag|dm|contact|text|writ|ping|bother)\w*(?:\s+to)?\s+me\b/i,
   /\b(?:leave me alone|no more (?:messages|dms))\b/i,
 ]
