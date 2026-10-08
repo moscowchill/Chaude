@@ -401,7 +401,7 @@ Set `OUTREACH_GUILD_ID` (the server) and `OUTREACH_OWNER_ID` (the owner's Discor
 
 Each question ends with a note that a bot sent it and that the reply goes to the owner. A member who replies "stop" is never messaged again. A drafted question with a link, invite or ping is dropped. Direct messages never reach the conversation loop; anyone else who DMs the bot gets one pointer back to the server a day.
 
-State is kept in `member-outreach.json` in the cache directory, so keep it across restarts. If it can't be read, outreach pauses, which keeps opt-outs from being lost. The Direct Messages intent is not privileged, so the developer portal needs no change. Members who turned off DMs from server members can't be asked: an owner request says so, and automatic questions skip them for 30 days.
+To undo an opt-out, stop the bot, remove the member's user ID from `optedOut` in `member-outreach.json`, then start the bot again; a running bot keeps the state in memory and would write the old list back. State is kept in `member-outreach.json` in the cache directory, so keep it across restarts. If it can't be read, outreach pauses, which keeps opt-outs from being lost. The Direct Messages intent is not privileged, so the developer portal needs no change. Members who turned off DMs from server members can't be asked: an owner request says so, and automatic questions skip them for 30 days.
 
 ## Tool access
 
