@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   asksToStop,
+  bestMatches,
   cleanDraft,
   DirectMessagesClosedError,
   loadOutreachConfig,
@@ -56,6 +57,7 @@ const config = (env: Record<string, string> = {}) =>
 
 function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
   const sent: Array<{ userId: string; content: string }> = []
+  const posts: Array<{ channelId: string; content: string; mentionUserId: string }> = []
   const reactions: string[] = []
   const discord: OutreachDiscord = {
     guildName: async () => 'Test Server',
@@ -72,12 +74,18 @@ function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
     sendDirect: async (userId, content) => {
       sent.push({ userId, content })
     },
+    channels: async (_guild, name) =>
+      name.replace(/^#/, '').toLowerCase() === 'general' ? [{ id: channelId, name: 'general' }] : [],
+    sendToChannel: async (channelId, content, mentionUserId) => {
+      posts.push({ channelId, content, mentionUserId })
+    },
+    canSee: async () => true,
     react: async (_channel, messageId, emoji) => {
       reactions.push(`${messageId}:${emoji}`)
     },
     ...overrides,
   }
-  return { discord, sent, reactions }
+  return { discord, sent, posts, reactions }
 }
 
 function fakeModel(...replies: Array<Record<string, unknown>>) {
@@ -236,7 +244,7 @@ describe('owner requests', () => {
     const complete = fakeModel({ message: QUESTION })
     const result = await ask(service({ discord, complete }))
 
-    expect(result).toContain(`Sent Builder this DM: "${QUESTION}"`)
+    expect(result).toContain(`Sent **Builder** (\`@builder\`) this DM: "${QUESTION}"`)
     expect(sent).toEqual([
       {
         userId: memberId,
@@ -318,7 +326,7 @@ describe('owner requests', () => {
 
     expect(await ask(outreach, 'other')).toContain("isn't mentioned or named")
     expect(complete).not.toHaveBeenCalled()
-    expect(await ask(outreach, 'builder')).toContain('Sent Builder')
+    expect(await ask(outreach, 'builder')).toContain('Sent **Builder** (`@builder`)')
     expect(sent.map((message) => message.userId)).toEqual([memberId])
   })
 
@@ -352,9 +360,261 @@ describe('owner requests', () => {
       stopReason: 'end_turn',
     })
     const outreach = service({ discord, complete })
-    for (let i = 0; i < 10; i++) expect(await ask(outreach)).toContain('Sent Builder')
+    for (let i = 0; i < 10; i++) expect(await ask(outreach)).toContain('Sent **Builder** (`@builder`)')
     expect(await ask(outreach)).toContain('limit')
     expect(complete).toHaveBeenCalledTimes(10)
+  })
+})
+
+const command = (member: string, question: string, channel = '') => ({
+  action: 'ask',
+  member,
+  question,
+  channel,
+})
+
+describe('owner requests by DM', () => {
+  it('ask a loosely named member by DM and confirm what was sent', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord()
+    const complete = fakeModel(command('build', 'how the indexer is going'), { message: QUESTION })
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('ask build how the indexer is going', ownerId))
+
+    const reader = complete.mock.calls[0]![0]
+    expect(reader).toMatchObject({ model: 'claude-haiku-5-5' })
+    expect(reader.outputSchema).toMatchObject({ required: ['action', 'member', 'question', 'channel'] })
+    expect(complete.mock.calls[1]![0]).toMatchObject({ model: 'claude-sonnet-5-5' })
+    expect(sent).toEqual([
+      {
+        userId: memberId,
+        content: `${QUESTION}\n\n-# I'm Chaude, a bot. Your reply goes to Owner. Reply "stop" and I won't message you again.`,
+      },
+      {
+        userId: ownerId,
+        content: `Sent **Builder** (\`@builder\`) this DM: "${QUESTION}" Their answer will come to you by DM.`,
+      },
+    ])
+    expect(savedState().threads[memberId]).toMatchObject({ status: 'open' })
+  })
+
+  it('ask in a named channel, pinging only that member', async () => {
+    vi.useFakeTimers()
+    const { discord, sent, posts } = fakeDiscord()
+    const complete = fakeModel(command('builder', 'how their day is going', 'general'), {
+      message: 'Owner asked me to check how your day is going. How is it?',
+    })
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('ask builder how their day is going in #general', ownerId))
+
+    expect(posts).toEqual([
+      {
+        channelId,
+        content: `<@${memberId}> Owner asked me to check how your day is going. How is it?`,
+        mentionUserId: memberId,
+      },
+    ])
+    expect(JSON.stringify(complete.mock.calls[1]![0].messages)).toContain('#general channel')
+    expect(sent).toEqual([
+      {
+        userId: ownerId,
+        content: 'Asked **Builder** (`@builder`) in #general: "Owner asked me to check how your day is going. How is it?"',
+      },
+    ])
+    expect(savedState().threads[memberId]).toBeUndefined()
+  })
+
+  it('find a member by a display name seen only in recent public messages', async () => {
+    vi.useFakeTimers()
+    const novaId = '45000000000000001'
+    const nova = { id: novaId, name: 'Nova Dev', username: 'nv_77', isBot: false }
+    const { discord, sent } = fakeDiscord({
+      member: async (_guild, userId) => (userId === novaId ? nova : members[userId]),
+      findMembers: async () => [],
+      publicMessages: async () => [
+        {
+          authorId: novaId,
+          authorName: 'Nova Dev',
+          authorUsername: 'nv_77',
+          isBot: false,
+          channelName: 'dev',
+          content: 'Shipping the indexer today.',
+          createdAt: T0 - HOUR,
+        },
+      ],
+    })
+    const outreach = service({
+      discord,
+      complete: fakeModel(command('novadev', 'how the release went'), { message: QUESTION }),
+    })
+    await deliver(outreach, dm('ask novadev how the release went', ownerId))
+    expect(sent[0]?.userId).toBe(novaId)
+  })
+
+  it('list the candidates when a name matches several members', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord({
+      findMembers: async () => [
+        members[memberId]!,
+        { id: otherId, name: 'Buildmaster', username: 'buildmaster', isBot: false },
+      ],
+    })
+    const complete = fakeModel(command('build', 'how it is going'))
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('ask build how it is going', ownerId))
+
+    expect(sent).toEqual([
+      {
+        userId: ownerId,
+        content:
+          'Several members match "build": **Builder** (`@builder`), **Buildmaster** (`@buildmaster`). Ask again with the exact username. Nothing was sent.',
+      },
+    ])
+    expect(complete).toHaveBeenCalledTimes(1)
+  })
+
+  it('answer with help when the request is unclear or names someone the owner never wrote', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord()
+    const complete = fakeModel(
+      { action: 'unclear', member: '', question: '', channel: '' },
+      command('other', 'anything')
+    )
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('hmm can you do the thing', ownerId))
+    await deliver(outreach, dm('ask builder about the indexer', ownerId))
+
+    expect(sent.map((message) => message.userId)).toEqual([ownerId, ownerId])
+    expect(sent.every((message) => message.content.startsWith('To have me ask someone'))).toBe(true)
+  })
+
+  it('stay private unless the owner wrote "in #channel", whatever channel the model returns', async () => {
+    vi.useFakeTimers()
+    const { discord, sent, posts } = fakeDiscord()
+    const complete = fakeModel(
+      command('builder', 'how the release went', 'general'),
+      { message: QUESTION },
+      command('builder', 'about the outage', 'general'),
+      { message: QUESTION }
+    )
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('ask builder how the release went', ownerId))
+    await deliver(outreach, dm('ask builder about the #general outage', ownerId))
+
+    expect(posts).toEqual([])
+    expect(sent.filter((message) => message.userId === memberId)).toHaveLength(2)
+  })
+
+  it('trust a loose name only right after "ask"; elsewhere it must be exact', async () => {
+    vi.useFakeTimers()
+    const v2Id = '45000000000000002'
+    const v2 = { id: v2Id, name: 'V2 Dev', username: 'v2_dev', isBot: false }
+    const { discord, sent } = fakeDiscord({
+      member: async (_guild, userId) => (userId === v2Id ? v2 : members[userId]),
+      findMembers: async () => [...Object.values(members), v2],
+    })
+    const complete = fakeModel(
+      command('v2', 'how the release went'),
+      command('builder', 'how it is going'),
+      { message: QUESTION }
+    )
+    const outreach = service({ discord, complete })
+    // The model picked "v2" out of the question: it is not where the owner put the name
+    await deliver(outreach, dm('ask builder how the v2 release went', ownerId))
+    // No "ask <name>" form, but an exact username: fine
+    await deliver(outreach, dm('can you check with builder how it is going', ownerId))
+
+    expect(sent[0]).toEqual({
+      userId: ownerId,
+      content: '"v2" only partly matches **V2 Dev** (`@v2_dev`). Ask again with the exact username. Nothing was sent.',
+    })
+    expect(sent.slice(1).map((message) => message.userId)).toEqual([memberId, ownerId])
+  })
+
+  it('refuse a channel the member cannot see', async () => {
+    vi.useFakeTimers()
+    const { discord, sent, posts } = fakeDiscord({ canSee: async () => false })
+    const outreach = service({
+      discord,
+      complete: fakeModel(command('builder', 'how it is going', 'general')),
+    })
+    await deliver(outreach, dm('ask builder how it is going in #general', ownerId))
+    expect(posts).toEqual([])
+    expect(sent).toEqual([
+      {
+        userId: ownerId,
+        content: "**Builder** (`@builder`) can't see #general, so a mention there would go unseen. Nothing was sent.",
+      },
+    ])
+  })
+
+  it('say so when the channel is unknown', async () => {
+    vi.useFakeTimers()
+    const { discord, sent, posts } = fakeDiscord()
+    const outreach = service({
+      discord,
+      complete: fakeModel(command('builder', 'how it is going', 'random')),
+    })
+    await deliver(outreach, dm('ask builder how it is going in #random', ownerId))
+    expect(posts).toEqual([])
+    expect(sent).toEqual([
+      { userId: ownerId, content: "I can't find a #random channel I can post in. Nothing was sent." },
+    ])
+  })
+
+  it('never come from anyone else', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord()
+    const complete = fakeModel(command('builder', 'anything'))
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('ask builder how the indexer is going', otherId))
+
+    expect(complete).not.toHaveBeenCalled()
+    expect(sent.map((message) => message.userId)).toEqual([otherId])
+  })
+
+  it('count toward the daily limit', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord()
+    const complete = vi.fn<OutreachComplete>(async (request) => ({
+      text: JSON.stringify(
+        JSON.stringify(request.messages).includes('sent it this direct message')
+          ? command('builder', 'how it is going')
+          : { message: QUESTION }
+      ),
+      stopReason: 'end_turn',
+    }))
+    const outreach = service({ discord, complete })
+    for (let i = 0; i < 10; i++) await ask(outreach)
+    await deliver(outreach, dm('ask builder how it is going', ownerId))
+    expect(sent.at(-1)).toEqual({
+      userId: ownerId,
+      content: "Today's limit of 10 member questions is reached. Nothing was sent.",
+    })
+  })
+})
+
+describe('matching a loosely typed name', () => {
+  const people = [
+    { id: '1', name: 'Builder', username: 'bob.builds', isBot: false },
+    { id: '2', name: 'Bob', username: 'builder', isBot: false },
+    { id: '3', name: 'Nova Dev', username: 'nv_77', isBot: false },
+    { id: '4', name: 'Builder Bot', username: 'builderbot', isBot: true },
+  ]
+  const ids = (query: string) => bestMatches(query, people).members.map((member) => member.id)
+
+  it('prefers an exact username or display name, then a prefix, then a part', () => {
+    // Two different members match exactly, by display name and by username: the owner picks
+    expect(ids('builder')).toEqual(['1', '2'])
+    expect(ids('Nova Dev')).toEqual(['3'])
+    expect(ids('novadev')).toEqual(['3'])
+    expect(ids('bob')).toEqual(['2'])
+    expect(ids('bo')).toEqual(['1', '2'])
+    expect(ids('77')).toEqual(['3'])
+    expect(ids('zzz')).toEqual([])
+    expect(ids('@!')).toEqual([])
+    expect(bestMatches('nova dev', people).exact).toBe(true)
+    expect(bestMatches('nova', people).exact).toBe(false)
   })
 })
 
@@ -490,12 +750,14 @@ describe('replies to a question', () => {
     expect(sent.filter((message) => message.userId === ownerId)).toHaveLength(1)
   })
 
-  it('stay silent to the owner, who needs no pointer', async () => {
+  it('stay silent to the owner when a DM needs no action', async () => {
     vi.useFakeTimers()
     const { discord, sent } = fakeDiscord()
-    const outreach = service({ discord, complete: fakeModel() })
+    const complete = fakeModel({ action: 'none', member: '', question: '', channel: '' })
+    const outreach = service({ discord, complete })
     await deliver(outreach, dm('thanks for passing that on', ownerId))
     expect(sent).toEqual([])
+    expect(complete).toHaveBeenCalledTimes(1)
   })
 
   it('get a daily pointer to the server when no question is open', async () => {
@@ -517,6 +779,7 @@ const talk = (authorId: string, count: number, at = T0 - DAY, isBot = false) =>
   Array.from({ length: count }, (_, i): OutreachChannelMessage => ({
     authorId,
     authorName: members[authorId]?.name ?? 'Someone',
+    authorUsername: members[authorId]?.username ?? 'someone',
     isBot,
     channelName: 'dev',
     content: `Working on the indexer rewrite, step ${i}: moving the block cache into its own service.`,
@@ -642,6 +905,25 @@ describe('outreach state', () => {
       userId: ownerId,
       content: `**Builder** (\`@builder\`) answered:\n> ${QUESTION}\nGoing well.`,
     })
+  })
+
+  it('tells the owner once that outreach is paused', async () => {
+    vi.useFakeTimers()
+    writeFileSync(join(dir, 'member-outreach.json'), '{"threads": "broken"}')
+    const { discord, sent } = fakeDiscord()
+    const complete = fakeModel()
+    const outreach = service({ discord, complete })
+    await deliver(outreach, dm('ask builder how it is going', ownerId))
+    await deliver(outreach, dm('hello?', ownerId))
+    await deliver(outreach, dm('hi', otherId))
+
+    expect(sent).toEqual([
+      {
+        userId: ownerId,
+        content: 'Member outreach is paused because its saved state is unreadable or unwritable. Check the bot logs.',
+      },
+    ])
+    expect(complete).not.toHaveBeenCalled()
   })
 
   it('pauses outreach when it is unreadable, so opt-outs are never lost', async () => {
