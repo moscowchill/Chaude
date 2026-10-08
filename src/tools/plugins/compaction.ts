@@ -410,20 +410,23 @@ const SELECTION_SCHEMA = {
  * then the older text forms "1, 3, 5" and "NONE".
  */
 export function parseSelection(text: string): number[] | 'none' {
-  const object = /\{[^{}]*\}/.exec(text)?.[0]
-  if (object) {
+  // The first object with a "selected" list counts, so braces in prose before it are skipped
+  for (const [chunk] of text.matchAll(/\{[^{}]*\}/g)) {
     try {
-      const parsed = JSON.parse(object) as { selected?: unknown }
-      if (Array.isArray(parsed.selected)) {
-        if (parsed.selected.length === 0) return 'none'
-        return parsed.selected.filter((n): n is number => typeof n === 'number')
-      }
+      const parsed = JSON.parse(chunk) as { selected?: unknown }
+      if (!Array.isArray(parsed.selected)) continue
+      if (parsed.selected.length === 0) return 'none'
+      // A pick listed twice would inject the same source twice
+      return [...new Set(parsed.selected.filter((n): n is number => typeof n === 'number'))]
     } catch {
-      // Braces without valid JSON: read it as the older text form
+      // Braces without valid JSON: try the next chunk
     }
   }
-  if (text === 'NONE') return 'none'
-  return text.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n))
+  const trimmed = text.trim()
+  if (trimmed === 'NONE') return 'none'
+  // The older "1, 3, 5" form counts only as the whole reply; numbers in a sentence don't
+  if (!/^\d+(?:\s*,\s*\d+)*$/.test(trimmed)) return []
+  return [...new Set(trimmed.split(',').map(s => parseInt(s, 10)))]
 }
 
 /**
