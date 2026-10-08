@@ -24,7 +24,7 @@ const PROMPT_CHARACTERS = 8000
 /** After an answer, further messages from the member still reach the owner for this long */
 const LATE_REPLIES_MS = 7 * DAY_MS
 const MAX_RELAYS_PER_THREAD = 20
-/** A member whose DMs were closed is skipped by automatic questions for this long */
+/** How long a member's closed DMs are remembered */
 const DMS_CLOSED_MS = 30 * DAY_MS
 const MIN_RETENTION_MS = 90 * DAY_MS
 /** DMs sent in quick succession are read as one reply, after a quiet spell or at most a minute */
@@ -117,6 +117,7 @@ export interface OutreachChannelMessage {
   authorName: string
   authorUsername: string
   isBot: boolean
+  channelId: string
   channelName: string
   content: string
   createdAt: number
@@ -144,8 +145,10 @@ export interface OutreachDiscord {
   findMembers(guildId: string, query: string): Promise<OutreachMember[]>
   /** Text channels the bot can post in, matched by name (case and symbols ignored) or <#id> */
   channels(guildId: string, name: string): Promise<OutreachChannel[]>
-  /** Posts in a server channel, pinging only `mentionUserId` */
-  sendToChannel(channelId: string, content: string, mentionUserId: string, nonce: string): Promise<void>
+  /** Posts in a server channel, pinging only `mentionUserId`; returns the posted message IDs */
+  sendToChannel(channelId: string, content: string, mentionUserId: string, nonce: string): Promise<string[]>
+  /** Replies to a message in a server channel without pinging anyone */
+  replyInChannel(channelId: string, messageId: string, content: string): Promise<void>
   /** Whether a member can view a channel, so a mention there reaches them */
   canSee(channelId: string, userId: string): Promise<boolean>
   /** Author, text, and mentioned or replied-to users of a server message, read from Discord */
@@ -172,6 +175,19 @@ export interface OutreachDiscord {
 export interface OutreachChannel {
   id: string
   name: string
+  /** Announcement channels take owner requests only, never automatic pings */
+  announcement?: boolean
+}
+
+/** A server message that replies to another message */
+export interface ChannelReply {
+  id: string
+  channelId: string
+  authorId: string
+  authorName: string
+  authorUsername: string
+  content: string
+  replyToId: string
 }
 
 export class DirectMessagesClosedError extends Error {
@@ -203,6 +219,32 @@ interface OutreachState {
   optedOut: Record<string, number>
   dmsClosed: Record<string, number>
   autoReplies: Record<string, number>
+  /** When each member last got an automatic question in a channel (for the cooldown) */
+  lastAsked: Record<string, number>
+  /** Questions posted in channels, by message ID, so a "stop" reply to one opts out */
+  posts: Record<string, ChannelPost>
+}
+
+interface ChannelPost {
+  userId: string
+  channelId: string
+  at: number
+}
+
+/** State files written before questions moved to channels have no `lastAsked` or `posts` */
+type StoredState = Omit<OutreachState, 'lastAsked' | 'posts'> & {
+  lastAsked?: Record<string, number>
+  posts?: Record<string, ChannelPost>
+}
+
+function isPost(value: unknown): value is ChannelPost {
+  return (
+    isRecord(value) &&
+    typeof value.userId === 'string' &&
+    SNOWFLAKE.test(value.userId) &&
+    typeof value.channelId === 'string' &&
+    isTime(value.at)
+  )
 }
 
 const emptyState = (): OutreachState => ({
@@ -213,6 +255,8 @@ const emptyState = (): OutreachState => ({
   optedOut: {},
   dmsClosed: {},
   autoReplies: {},
+  lastAsked: {},
+  posts: {},
 })
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -235,7 +279,7 @@ function isThread(value: unknown): value is Thread {
   )
 }
 
-function isState(value: unknown): value is OutreachState {
+function isState(value: unknown): value is StoredState {
   if (!isRecord(value) || typeof value.day !== 'string' || !Number.isInteger(value.requests)) {
     return false
   }
@@ -249,7 +293,10 @@ function isState(value: unknown): value is OutreachState {
     Object.entries(threads).every(([id, thread]) => SNOWFLAKE.test(id) && isThread(thread)) &&
     isTimes(value.optedOut) &&
     isTimes(value.dmsClosed) &&
-    isTimes(value.autoReplies)
+    isTimes(value.autoReplies) &&
+    (value.lastAsked === undefined || isTimes(value.lastAsked)) &&
+    (value.posts === undefined ||
+      (isRecord(value.posts) && Object.values(value.posts).every(isPost)))
   )
 }
 
@@ -386,6 +433,20 @@ const IN_CHANNEL = /\bin\s+(<#\d{17,20}>|#[^\s,.!?]+)/i
 /** The name right after "ask" in the owner's own words, when they wrote it that way */
 const ASK_NAME = /\bask\s+@?([^\s,:;!?]+)/i
 
+/** The channels a member posted in, most messages first */
+function channelsOf(messages: OutreachChannelMessage[]): OutreachChannel[] {
+  const counts = new Map<string, { channel: OutreachChannel; count: number }>()
+  for (const message of messages) {
+    const entry = counts.get(message.channelId) ?? {
+      channel: { id: message.channelId, name: message.channelName },
+      count: 0,
+    }
+    entry.count++
+    counts.set(message.channelId, entry)
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count).map((entry) => entry.channel)
+}
+
 const quote = (text: string) =>
   text
     .split('\n')
@@ -413,10 +474,11 @@ const AUTOMATIC_SCHEMA = {
   type: 'object',
   properties: {
     ask: { type: 'boolean' },
+    channel: { type: 'string' },
     topic: { type: 'string' },
     message: { type: 'string' },
   },
-  required: ['ask', 'topic', 'message'],
+  required: ['ask', 'channel', 'topic', 'message'],
   additionalProperties: false,
 }
 
@@ -496,7 +558,7 @@ export class OutreachService {
       if (existsSync(this.config.statePath)) {
         const stored: unknown = JSON.parse(readFileSync(this.config.statePath, 'utf8'))
         if (!isState(stored)) throw new Error('Invalid member outreach state')
-        this.state = stored
+        this.state = { ...stored, lastAsked: stored.lastAsked ?? {}, posts: stored.posts ?? {} }
       }
     } catch (error) {
       // Without the saved opt-outs and cooldowns nobody can be messaged safely
@@ -568,6 +630,20 @@ export class OutreachService {
     void this.run(() => this.handleReplies(entry.messages)).catch((error: unknown) => {
       logger.error({ err: error, userId }, 'Direct message handling failed')
     })
+  }
+
+  /**
+   * A reply in a server channel, before the agent loop sees it. Returns true when it was a
+   * "stop" from the member a question was posted to, which ends outreach to them.
+   */
+  onChannelReply(reply: ChannelReply): boolean {
+    if (!this.stateAvailable) return false
+    const post = this.state.posts[reply.replyToId]
+    if (!post || post.userId !== reply.authorId || !asksToStop(reply.content)) return false
+    void this.run(() => this.optOutInChannel(reply)).catch((error: unknown) => {
+      logger.error({ err: error, userId: reply.authorId }, 'Channel opt-out failed')
+    })
+    return true
   }
 
   /** Sends an automatic question when one is due */
@@ -702,12 +778,13 @@ export class OutreachService {
     const text = cleanDraft(draft?.message)
     if (!text) return 'The drafted question was unusable (empty, too long, or with links or mentions). Nothing was sent.'
     const now = this.now()
-    await this.discord.sendToChannel(
+    const ids = await this.discord.sendToChannel(
       channel.id,
       `<@${target.id}> ${text}`,
       target.id,
       nonceFor(channel.id, target.id, now, text)
     )
+    this.recordPosts(ids, target.id, channel.id, now)
     logger.info({ userId: target.id, channelId: channel.id }, 'Asked a member in a channel for the owner')
     return `Asked ${who(target.name, target.username)} in #${channel.name}: "${text}"`
   }
@@ -982,6 +1059,20 @@ export class OutreachService {
     }
   }
 
+  private async optOutInChannel(reply: ChannelReply): Promise<void> {
+    this.state.optedOut[reply.authorId] = this.now()
+    const thread = this.state.threads[reply.authorId]
+    if (thread) thread.status = 'done'
+    this.save()
+    await this.discord
+      .replyInChannel(reply.channelId, reply.id, "Got it, I won't ask you again.")
+      .catch((error: unknown) => logger.warn({ err: error }, 'Could not confirm an opt-out in the channel'))
+    await this.relay(
+      `${who(reply.authorName, reply.authorUsername)} asked not to be asked again, so I won't contact them. They wrote:\n${quote(reply.content)}`
+    )
+    logger.info({ userId: reply.authorId }, 'Member opted out of outreach in a channel')
+  }
+
   /** `text` is relayed to the owner along with the notice; undefined means the owner isn't told */
   private async optOut(userId: string, label: string, text: string | undefined): Promise<void> {
     this.state.optedOut[userId] = this.now()
@@ -1022,7 +1113,7 @@ export class OutreachService {
         return (
           userId === this.config.ownerId ||
           Boolean(this.state.optedOut[userId]) ||
-          now - (this.state.dmsClosed[userId] ?? 0) < DMS_CLOSED_MS ||
+          now - (this.state.lastAsked[userId] ?? 0) < cooldown ||
           thread?.status === 'open' ||
           (thread !== undefined && now - thread.askedAt < cooldown)
         )
@@ -1033,7 +1124,7 @@ export class OutreachService {
       const j = Math.floor(this.random() * (i + 1))
       ;[candidates[i], candidates[j]] = [candidates[j]!, candidates[i]!]
     }
-    const [guild, owner] = await Promise.all([this.guildName(), this.ownerName()])
+    const guild = await this.guildName()
 
     for (const candidate of candidates) {
       if (automatic.drafts >= MAX_DRAFTS_PER_DAY) return
@@ -1043,12 +1134,11 @@ export class OutreachService {
       this.save()
       const draft = await this.draft(
         [
-          `You write one direct message from ${this.botName}, a bot in the ${guild} Discord server, to the member ${member.name}. ${owner} runs ${this.botName} and likes to hear what people in the community are working on, so ${member.name}'s answer goes to ${owner}.`,
-          `Here are ${member.name}'s recent messages in public channels, oldest first:`,
+          `You write one message from ${this.botName}, a bot in the ${guild} Discord server, to start a conversation with the member ${member.name} in a public channel. Here are ${member.name}'s recent messages in public channels, oldest first, each with its channel:`,
           `<messages>\n${transcript(candidate.messages)}\n</messages>`,
-          `Find something ${member.name} is working on, such as a project, tool, research or contribution, and ask one specific, professional question about it as your own question, without mentioning ${owner}: progress, a design choice, next steps, or what would help. Show that you read what they wrote. Use 1-3 friendly sentences in plain text, with no links, @mentions or markdown.`,
-          'Keep to work. Leave out personal life, health, money and holdings, and anything they might not want raised in private.',
-          'Set topic to a few words naming what you asked about. If nothing in their messages is work you could ask about, set ask to false.',
+          `Find something ${member.name} is working on, such as a project, tool, research or contribution, and ask one specific, friendly question about it as your own question: progress, a design choice, next steps, or what would help. Show that you read what they wrote. Use 1-3 sentences in plain text, with no links, @mentions or markdown. The message starts with a mention of ${member.name}, so don't open with their name.`,
+          'Keep to work. Leave out personal life, health, money and holdings, and anything they might not want raised in public.',
+          'Set channel to the channel (without #) where they talked about what you ask about, and topic to a few words naming it. If nothing in their messages is work you could ask about, set ask to false.',
         ].join('\n\n'),
         AUTOMATIC_SCHEMA
       )
@@ -1057,42 +1147,56 @@ export class OutreachService {
         logger.info({ userId: member.id }, 'No automatic question for this member')
         continue
       }
-      now = this.now()
-      // Counted before the send, so a crash right after it can't lead to a second question today
-      automatic.sent++
-      this.save()
-      try {
-        await this.discord.sendDirect(
-          member.id,
-          `${text}\n\n${this.footer(owner)}`,
-          nonceFor(member.id, now, text)
-        )
-      } catch (error) {
-        if (!(error instanceof DirectMessagesClosedError)) throw error
-        automatic.sent--
-        this.state.dmsClosed[member.id] = now
-        this.save()
+      // Only a channel they posted in: the model's pick first, then their most active one,
+      // and only where the bot may post
+      const theirs = channelsOf(candidate.messages)
+      const picked = typeof draft?.channel === 'string' ? normalizedName(draft.channel) : ''
+      let channel: OutreachChannel | undefined
+      for (const option of [
+        ...theirs.filter((c) => normalizedName(c.name) === picked),
+        ...theirs.filter((c) => normalizedName(c.name) !== picked),
+      ]) {
+        const [found] = await this.discord.channels(this.config.guildId, `<#${option.id}>`)
+        // Announcement channels aren't for conversation, and a role change may hide a channel
+        if (found && !found.announcement && (await this.discord.canSee(found.id, member.id))) {
+          channel = found
+          break
+        }
+      }
+      if (!channel) {
+        logger.info({ userId: member.id }, 'No channel to ask this member in')
         continue
       }
-      this.state.threads[member.id] = {
-        source: 'automatic',
-        question: text,
-        askedAt: now,
-        status: 'open',
-        lastActivityAt: now,
-        relayed: 0,
-      }
+      now = this.now()
+      // Counted before the post, so a crash right after it can't lead to a second question today
+      automatic.sent++
+      this.state.lastAsked[member.id] = now
+      this.save()
+      const ids = await this.discord.sendToChannel(
+        channel.id,
+        `<@${member.id}> ${text}`,
+        member.id,
+        nonceFor(channel.id, member.id, now, text)
+      )
+      this.recordPosts(ids, member.id, channel.id, now)
       automatic.nextAt =
         automatic.sent < this.config.dailyLimit ? this.later(now, 2 * HOUR_MS) : null
       this.save()
-      logger.info({ userId: member.id }, 'Sent an automatic member question')
+      logger.info({ userId: member.id, channelId: channel.id }, 'Asked an automatic question in a channel')
       const topic =
         typeof draft?.topic === 'string' && draft.topic.trim()
           ? draft.topic.trim().slice(0, 80)
           : 'their work'
-      await this.relay(`I asked ${who(member.name, member.username)} about ${topic}:\n${quote(text)}`)
+      await this.relay(
+        `I asked ${who(member.name, member.username)} in #${channel.name} about ${topic}:\n${quote(text)}`
+      )
       return
     }
+  }
+
+  private recordPosts(ids: string[], userId: string, channelId: string, at: number): void {
+    for (const id of ids) this.state.posts[id] = { userId, channelId, at }
+    this.save()
   }
 
   private async draft(
@@ -1184,6 +1288,12 @@ export class OutreachService {
     }
     for (const [userId, at] of Object.entries(this.state.dmsClosed)) {
       if (now - at > DMS_CLOSED_MS) delete this.state.dmsClosed[userId]
+    }
+    for (const [userId, at] of Object.entries(this.state.lastAsked)) {
+      if (now - at > retention) delete this.state.lastAsked[userId]
+    }
+    for (const [messageId, post] of Object.entries(this.state.posts)) {
+      if (now - post.at > retention) delete this.state.posts[messageId]
     }
     for (const [userId, at] of Object.entries(this.state.autoReplies)) {
       if (now - at > DAY_MS) delete this.state.autoReplies[userId]

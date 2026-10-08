@@ -252,6 +252,7 @@ async function main() {
         },
       })
       connector.setDirectMessageHandler(message => outreach?.onDirectMessage(message))
+      connector.setChannelReplyHandler(reply => outreach?.onChannelReply(reply) ?? false)
       agentLoop.setOutreach(outreach)
       outreach.start()
       logger.info(
