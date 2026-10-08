@@ -9,6 +9,7 @@ import { EventQueue } from './agent/event-queue.js'
 import { AgentLoop } from './agent/loop.js'
 import { ChannelStateManager } from './agent/state-manager.js'
 import { DiscordConnector } from './discord/connector.js'
+import { loadOutreachConfig, OutreachService } from './discord/outreach.js'
 import { loadWelcomeConfig } from './discord/welcome.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
@@ -175,12 +176,14 @@ async function main() {
     // They are configured in bot config and can be overridden per-guild/channel
 
     // Initialize Discord connector
+    const outreachConfig = loadOutreachConfig(process.env, cachePath)
     const connector = new DiscordConnector(queue, {
       token: discordToken,
       cacheDir: cachePath + '/images',
       maxBackoffMs: 32000,
       welcome: loadWelcomeConfig(process.env, cachePath),
       ignoreWebhooks: process.env.IGNORE_WEBHOOK_MESSAGES === 'true',
+      directMessages: Boolean(outreachConfig),
     })
 
     await connector.start()
@@ -220,6 +223,43 @@ async function main() {
 
     // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
+
+    // Member outreach (optional): questions to members by DM, answers to the owner by DM
+    let outreach: OutreachService | undefined
+    if (outreachConfig) {
+      outreach = new OutreachService({
+        config: outreachConfig,
+        discord: connector.outreachDiscord(),
+        botName: botUsername,
+        complete: async (request) => {
+          const completion = await llmMiddleware.completeRaw({
+            model: request.model,
+            messages: request.messages,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature ?? 1,
+            top_p: 1,
+            effort: request.effort,
+            thinking: request.thinking,
+            outputSchema: request.outputSchema,
+          })
+          return {
+            text: completion.content
+              .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+              .map(block => block.text)
+              .join(''),
+            stopReason: completion.stopReason,
+          }
+        },
+      })
+      connector.setDirectMessageHandler(message => outreach?.onDirectMessage(message))
+      connector.setChannelReplyHandler(reply => outreach?.onChannelReply(reply) ?? false)
+      agentLoop.setOutreach(outreach)
+      outreach.start()
+      logger.info(
+        { guildId: outreachConfig.guildId, dailyLimit: outreachConfig.dailyLimit },
+        'Member outreach enabled'
+      )
+    }
     
     // Initialize membrane (optional - used when bot config has use_membrane: true)
     try {
@@ -252,6 +292,8 @@ async function main() {
       logger.info({ signal }, 'Shutting down')
 
       agentLoop.stop()
+      outreach?.stop()
+      await outreach?.idle()
       await memoryQueue.drain()
       if (apiServer) {
         await apiServer.stop()

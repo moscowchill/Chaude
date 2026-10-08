@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest'
 import notesPlugin from './notes.js'
-import compactionPlugin from './compaction.js'
+import compactionPlugin, { parseSelection } from './compaction.js'
 import type { PluginStateContext, ActivationResult, PluginLLMRequest, PluginLLMResponse } from './types.js'
 
 interface FakeContextOptions {
@@ -112,9 +112,9 @@ describe('compaction summarization direction', () => {
 })
 
 describe('compaction source selection', () => {
-  it('asks with thinking at low effort and room to finish, then uses the numbers', async () => {
-    // With thinking off, Haiku 5.5 reasoned in the visible reply and hit the old
-    // 100-token cap before any numbers, so selection silently picked nothing
+  it('asks for structured output and uses the numbers it returns', async () => {
+    // Free text let Haiku 5.5 explain its choice in prose and the parser picked stray
+    // numbers out of it; the schema forces {"selected": [...]}
     const summaries = Array.from({ length: 6 }, (_, i) => ({
       id: `s${i}`,
       messageRange: { start: `a${i}`, end: `b${i}` },
@@ -126,16 +126,38 @@ describe('compaction source selection', () => {
     const { context, llmCalls } = makeContext({
       pluginConfig: { enabled: true, enable_selection: true, selection_threshold: 5 },
       initialState: { summaries, lastCompactionMessageId: null, summarizedMessageIds: [] },
-      llmResponse: '2, 4',
+      llmResponse: '{"selected": [2, 4]}',
     })
 
     const injections = await compactionPlugin.getContextInjections!(context)
 
-    const selection = llmCalls.find(c => JSON.stringify(c.messages).includes('Respond with ONLY the numbers'))
-    expect(selection).toMatchObject({ max_tokens: 1024, thinking: 'adaptive', effort: 'low' })
+    const selection = llmCalls.find(c => JSON.stringify(c.messages).includes('selected'))
+    expect(selection).toMatchObject({ max_tokens: 1024 })
+    expect(selection?.outputSchema).toMatchObject({ required: ['selected'] })
+    expect(selection?.thinking).toBeUndefined()
     expect(JSON.stringify(injections)).toContain('summary number 1')
     expect(JSON.stringify(injections)).toContain('summary number 3')
     expect(JSON.stringify(injections)).not.toContain('summary number 5')
+  })
+})
+
+describe('compaction selection replies', () => {
+  it.each([
+    ['structured output', '{"selected": [2, 7]}', [2, 7]],
+    ['an empty structured pick', '{"selected": []}', 'none'],
+    ['JSON in a code fence', '```json\n{"selected": [2, 7]}\n```', [2, 7]],
+    ['JSON after a sentence', 'Picks: {"selected": [3]}', [3]],
+    ['a pick list without numbers', '{"selected": ["two"]}', []],
+    ['older comma text', '2, 7', [2, 7]],
+    ['prose with commas', 'Message 7 mentions it, 3 days ago', []],
+    ['a string where the list goes', '{"selected": "2, 4"}', []],
+    ['braces before the JSON', 'Context {greeting} then {"selected": [3]}', [3]],
+    ['duplicate picks', '{"selected": [2, 2, 4]}', [2, 4]],
+    ['duplicate older text', '2, 2, 4', [2, 4]],
+    ['older NONE', 'NONE', 'none'],
+    ['prose', 'The latest message is a greeting, so nothing applies.', []],
+  ])('parses %s', (_case, text, expected) => {
+    expect(parseSelection(text)).toEqual(expected)
   })
 })
 

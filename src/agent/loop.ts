@@ -32,6 +32,7 @@ import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.j
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
+import type { OutreachService } from '../discord/outreach.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -65,6 +66,9 @@ export class AgentLoop {
   
   // Membrane integration (optional)
   private membraneProvider?: MembraneProvider
+
+  // Member outreach (optional): DMs members for the owner
+  private outreach?: Pick<OutreachService, 'ask'>
 
   // Cache for document summaries (keyed by attachment URL)
   private summaryCache = new Map<string, string>()
@@ -100,6 +104,13 @@ export class AgentLoop {
   setMembrane(membrane: Membrane): void {
     this.membraneProvider = new MembraneProvider(membrane, this.botId)
     logger.info({ botId: this.botId }, 'Membrane provider set')
+  }
+
+  /**
+   * Enable the ask_member tool (member outreach)
+   */
+  setOutreach(outreach: Pick<OutreachService, 'ask'>): void {
+    this.outreach = outreach
   }
 
   /**
@@ -496,7 +507,7 @@ export class AgentLoop {
                 triggerEvents: activationReason.events,
               })
               
-              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector)
+              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector, activationReason.reason)
             },
             channelName
           )
@@ -537,7 +548,7 @@ export class AgentLoop {
             throw traceError
           }
         })
-      : this.handleActivation(channelId, guildId, triggeringMessageId)
+      : this.handleActivation(channelId, guildId, triggeringMessageId, undefined, activationReason.reason)
     
     await activationPromise
       .catch((error) => {
@@ -1109,7 +1120,8 @@ export class AgentLoop {
     channelId: string, 
     guildId: string, 
     triggeringMessageId?: string,
-    trace?: TraceCollector
+    trace?: TraceCollector,
+    reason?: 'mention' | 'reply' | 'random' | 'm_command'
   ): Promise<void> {
     logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId, traceId: trace?.getTraceId() }, 'Bot activated')
 
@@ -1322,6 +1334,12 @@ export class AgentLoop {
           return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
         },
         visibleImages: initialVisibleImages,
+        // Only for a mention or reply: the service reads the requester from this message on
+        // Discord, so the model can't choose who is asking
+        askMember: this.outreach && triggeringMessageId && (reason === 'mention' || reason === 'reply')
+          ? (member: string, request: string) =>
+              this.outreach!.ask({ channelId, messageId: triggeringMessageId, member, request })
+          : undefined,
       })
       endProfile('pluginSetup')
 
@@ -1461,6 +1479,7 @@ export class AgentLoop {
             top_p: 1,
             effort: request.effort,
             thinking: request.thinking,
+            outputSchema: request.outputSchema,
           })
           // Extract text from content blocks
           const text = completion.content

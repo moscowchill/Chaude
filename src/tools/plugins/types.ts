@@ -136,6 +136,12 @@ export interface PluginContext {
   uploadFile?: (buffer: Buffer, filename: string, contentType: string, caption?: string) => Promise<string[]>  // Upload a file
   /** Images visible to the bot (from Discord context + MCP tool results), newest first */
   visibleImages?: VisibleImage[]
+  /**
+   * DM a server member a question for the requester and route the answer back to them.
+   * The service checks the triggering message's author, so only the configured owner can.
+   * Unset when member outreach is off. Returns the result to show the model.
+   */
+  askMember?: (member: string, request: string) => Promise<string>
 }
 
 /**
@@ -153,6 +159,8 @@ export interface PluginLLMRequest {
   effort?: Effort
   /** Anthropic API thinking; unset uses the provider's per-model default */
   thinking?: ThinkingMode
+  /** JSON schema the reply must match, on models with structured output; others get plain text */
+  outputSchema?: Record<string, unknown>
 }
 
 /**
