@@ -149,6 +149,11 @@ describe('compaction selection replies', () => {
     ['JSON after a sentence', 'Picks: {"selected": [3]}', [3]],
     ['a pick list without numbers', '{"selected": ["two"]}', []],
     ['older comma text', '2, 7', [2, 7]],
+    ['prose with commas', 'Message 7 mentions it, 3 days ago', []],
+    ['a string where the list goes', '{"selected": "2, 4"}', []],
+    ['braces before the JSON', 'Context {greeting} then {"selected": [3]}', [3]],
+    ['duplicate picks', '{"selected": [2, 2, 4]}', [2, 4]],
+    ['duplicate older text', '2, 2, 4', [2, 4]],
     ['older NONE', 'NONE', 'none'],
     ['prose', 'The latest message is a greeting, so nothing applies.', []],
   ])('parses %s', (_case, text, expected) => {
