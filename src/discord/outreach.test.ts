@@ -29,6 +29,9 @@ const memberId = '33333333333333333'
 const otherId = '44444444444444444'
 const botId = '55555555555555555'
 const channelId = '66666666666666666'
+const devChannelId = '67000000000000001'
+/** A channel members talk in that the bot may not post in */
+const quietChannelId = '67000000000000002'
 const triggerId = '77777777777777777'
 const dmChannelId = '88888888888888888'
 const HOUR = 60 * 60 * 1000
@@ -75,7 +78,10 @@ function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
       sent.push({ userId, content })
     },
     channels: async (_guild, name) =>
-      name.replace(/^#/, '').toLowerCase() === 'general' ? [{ id: channelId, name: 'general' }] : [],
+      [
+        { id: channelId, name: 'general' },
+        { id: devChannelId, name: 'dev' },
+      ].filter((c) => name.trim() === `<#${c.id}>` || name.replace(/^#/, '').toLowerCase() === c.name),
     sendToChannel: async (channelId, content, mentionUserId) => {
       posts.push({ channelId, content, mentionUserId })
     },
@@ -440,6 +446,7 @@ describe('owner requests by DM', () => {
           authorName: 'Nova Dev',
           authorUsername: 'nv_77',
           isBot: false,
+          channelId: devChannelId,
           channelName: 'dev',
           content: 'Shipping the indexer today.',
           createdAt: T0 - HOUR,
@@ -778,13 +785,20 @@ describe('replies to a question', () => {
   })
 })
 
-const talk = (authorId: string, count: number, at = T0 - DAY, isBot = false) =>
+const talk = (
+  authorId: string,
+  count: number,
+  at = T0 - DAY,
+  isBot = false,
+  channel = { id: devChannelId, name: 'dev' }
+) =>
   Array.from({ length: count }, (_, i): OutreachChannelMessage => ({
     authorId,
     authorName: members[authorId]?.name ?? 'Someone',
     authorUsername: members[authorId]?.username ?? 'someone',
     isBot,
-    channelName: 'dev',
+    channelId: channel.id,
+    channelName: channel.name,
     content: `Working on the indexer rewrite, step ${i}: moving the block cache into its own service.`,
     createdAt: at + i * 1000,
   }))
@@ -802,12 +816,13 @@ describe('automatic questions', () => {
     expect(outreachCandidates(messages, T0 - 14 * DAY, (id) => id === memberId)).toEqual([])
   })
 
-  it('ask one member a day inside the window and tell the owner', async () => {
-    const { discord, sent } = fakeDiscord({
+  it('ask one member a day in the public channel they talk in, and tell the owner', async () => {
+    const { discord, sent, posts } = fakeDiscord({
       publicMessages: async () => [...talk(memberId, 6), ...talk(ownerId, 6)],
     })
     const complete = fakeModel({
       ask: true,
+      channel: 'dev',
       topic: 'the indexer rewrite',
       message: 'How is the indexer rewrite going?',
     })
@@ -815,21 +830,41 @@ describe('automatic questions', () => {
     await outreach.tick()
     await outreach.tick()
 
+    expect(posts).toEqual([
+      {
+        channelId: devChannelId,
+        content: `<@${memberId}> How is the indexer rewrite going?`,
+        mentionUserId: memberId,
+      },
+    ])
     expect(sent).toEqual([
       {
-        userId: memberId,
-        content: `How is the indexer rewrite going?\n\n-# I'm Chaude, a bot. Replies here are shared with Owner. Reply "stop" and I won't message you again.`,
-      },
-      {
         userId: ownerId,
-        content: 'I asked **Builder** (`@builder`) about the indexer rewrite:\n> How is the indexer rewrite going?',
+        content: 'I asked **Builder** (`@builder`) in #dev about the indexer rewrite:\n> How is the indexer rewrite going?',
       },
     ])
     const request = complete.mock.calls[0]![0]
     expect(request).toMatchObject({ model: 'claude-sonnet-5-5', thinking: 'adaptive' })
-    expect(request.outputSchema).toMatchObject({ required: ['ask', 'topic', 'message'] })
+    expect(request.outputSchema).toMatchObject({ required: ['ask', 'channel', 'topic', 'message'] })
     expect(JSON.stringify(request.messages)).toContain('[#dev, 2026-10-07] Working on the indexer')
+    expect(JSON.stringify(request.messages)).toContain('in a public channel')
+    expect(savedState().threads[memberId]).toBeUndefined()
     expect(complete).toHaveBeenCalledTimes(1)
+  })
+
+  it('post only in a channel the member used and the bot may post in', async () => {
+    const { discord, posts } = fakeDiscord({
+      publicMessages: async () => [
+        ...talk(memberId, 4, T0 - DAY, false, { id: quietChannelId, name: 'announcements' }),
+        ...talk(memberId, 2, T0 - HOUR),
+      ],
+    })
+    // The model names a channel the member never posted in
+    const complete = fakeModel({ ask: true, channel: 'general', topic: 'the indexer', message: 'How is it going?' })
+    await service({ discord, complete }).tick()
+
+    // Their busiest channel refuses posts, so it lands in the next one they use
+    expect(posts.map((post) => post.channelId)).toEqual([devChannelId])
   })
 
   it('skip members with nothing to ask about, up to three drafts a day', async () => {
@@ -851,10 +886,10 @@ describe('automatic questions', () => {
 
   it('count the question before sending, so a failed send means no second one that day', async () => {
     let now = T0
-    const sendDirect = vi.fn(async () => {
+    const sendToChannel = vi.fn(async () => {
       throw new Error('network down')
     })
-    const { discord } = fakeDiscord({ publicMessages: async () => talk(memberId, 6, T0 - HOUR), sendDirect })
+    const { discord } = fakeDiscord({ publicMessages: async () => talk(memberId, 6, T0 - HOUR), sendToChannel })
     const complete = vi.fn<OutreachComplete>().mockResolvedValue({
       text: JSON.stringify({ ask: true, topic: 'the indexer', message: 'How is the indexer going?' }),
       stopReason: 'end_turn',
@@ -864,12 +899,12 @@ describe('automatic questions', () => {
     now = T0 + 2 * HOUR
     await outreach.tick()
     expect(complete).toHaveBeenCalledTimes(1)
-    expect(sendDirect).toHaveBeenCalledTimes(1)
+    expect(sendToChannel).toHaveBeenCalledTimes(1)
   })
 
   it('leave a member alone during the cooldown', async () => {
     let now = T0
-    const { discord, sent } = fakeDiscord({ publicMessages: async () => talk(memberId, 6, T0 - HOUR) })
+    const { discord, posts } = fakeDiscord({ publicMessages: async () => talk(memberId, 6, T0 - HOUR) })
     const complete = vi.fn<OutreachComplete>().mockResolvedValue({
       text: JSON.stringify({ ask: true, topic: 'the indexer', message: 'How is the indexer going?' }),
       stopReason: 'end_turn',
@@ -880,7 +915,7 @@ describe('automatic questions', () => {
     await outreach.tick()
 
     expect(complete).toHaveBeenCalledTimes(1)
-    expect(sent.filter((message) => message.userId === memberId)).toHaveLength(1)
+    expect(posts).toHaveLength(1)
   })
 
   it('stay off at a daily limit of 0 and outside the sending window', async () => {
@@ -927,6 +962,23 @@ describe('outreach state', () => {
       },
     ])
     expect(complete).not.toHaveBeenCalled()
+  })
+
+  it('loads a state file from before automatic questions moved to channels', async () => {
+    writeFileSync(
+      join(dir, 'member-outreach.json'),
+      JSON.stringify({
+        day: '',
+        requests: 0,
+        automatic: { sent: 0, drafts: 0, nextAt: null },
+        threads: {},
+        optedOut: {},
+        dmsClosed: {},
+        autoReplies: {},
+      })
+    )
+    const { discord } = fakeDiscord()
+    expect(await ask(service({ discord, complete: fakeModel({ message: QUESTION }) }))).toContain('Sent')
   })
 
   it('pauses outreach when it is unreadable, so opt-outs are never lost', async () => {

@@ -178,6 +178,7 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
               message.member?.displayName ?? message.author.globalName ?? message.author.username,
             authorUsername: message.author.username,
             isBot: message.author.bot,
+            channelId: channel.id,
             channelName: channel.name,
             content: message.content,
             createdAt: message.createdTimestamp,
