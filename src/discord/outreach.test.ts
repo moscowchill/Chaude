@@ -168,6 +168,11 @@ describe('asking to stop', () => {
     'remove me',
     'not interested, stop',
     'Please leave me alone',
+    'ok\nstop',
+    'Thanks!\nplease stop messaging me',
+    'pls stop',
+    'unsub',
+    'go away',
   ])('catches %j', (text) => {
     expect(asksToStop(text)).toBe(true)
   })
@@ -177,6 +182,9 @@ describe('asking to stop', () => {
     'It stopped crashing after the fix.',
     'Going well, shipping Friday.',
     'No more blockers, the indexer is done.',
+    'The bug did not go away until the restart.',
+    'Unsubscribed from the noisy feed, it helped.',
+    'ok\nthanks',
   ])('lets an answer through: %j', (text) => {
     expect(asksToStop(text)).toBe(false)
   })
