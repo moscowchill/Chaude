@@ -14,6 +14,7 @@ import mcpResourcesPlugin from './mcp-resources.js'
 import braveSearchPlugin from './brave-search.js'
 import compactionPlugin from './compaction.js'
 import readFilePlugin from './read-file.js'
+import outreachPlugin from './outreach.js'
 
 // Register all available plugins
 export const availablePlugins: Record<string, ToolPlugin> = {
@@ -26,6 +27,7 @@ export const availablePlugins: Record<string, ToolPlugin> = {
   'brave-search': braveSearchPlugin,
   'compaction': compactionPlugin,
   'read-file': readFilePlugin,
+  'outreach': outreachPlugin,
 }
 
 export * from './types.js'

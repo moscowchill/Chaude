@@ -391,6 +391,18 @@ Set `WELCOME_GUILD_ID` and `WELCOME_CHANNEL_ID` in `.env`, then enable Server Me
 
 `WELCOME_MESSAGE` optionally overrides the greeting; `{user}` becomes the new member's mention. Welcomes use a fixed message without an LLM call. Duplicate events are suppressed using persisted state in the cache directory and a Discord message nonce. A later rejoin can receive another welcome. Keep the cache directory across restarts.
 
+## Member outreach
+
+Set `OUTREACH_GUILD_ID` (the server) and `OUTREACH_OWNER_ID` (the owner's Discord user ID) in `.env`, and add `outreach` to the bot's `tool_plugins`. The bot then does three things:
+
+- **Questions on request.** "@bot ask @member how the indexer is going" has the bot DM that member a question written by `OUTREACH_QUESTION_MODEL` (default `claude-sonnet-5-5`). The `ask_member` tool reads the author of the triggering message from Discord, so only the owner can use it. The limit is 10 requests a day.
+- **Questions of its own.** Up to `OUTREACH_DAILY_LIMIT` a day (default 1; `0` turns them off), at a random time between 09:00 and 17:00 UTC. The bot picks a member with at least 5 messages in the last 14 days in channels everyone can read, has the question model write one work-related question from those messages, and tells the owner what it asked. The same member is asked again after `OUTREACH_COOLDOWN_DAYS` (default 30) at the earliest.
+- **Answers to the owner.** Every answer goes to the owner by DM. `OUTREACH_REPLY_MODEL` (default `claude-haiku-5-5`) answers the member with a thank-you or one follow-up question at most, and the conversation closes after that. Later messages from the member still reach the owner for a week.
+
+Each question ends with a note that a bot sent it and that the reply goes to the owner. A member who replies "stop" is never messaged again. A drafted question with a link, invite or ping is dropped. Direct messages never reach the conversation loop; anyone else who DMs the bot gets one pointer back to the server a day.
+
+State is kept in `member-outreach.json` in the cache directory, so keep it across restarts. If it can't be read, outreach pauses, which keeps opt-outs from being lost. The Direct Messages intent is not privileged, so the developer portal needs no change. Members who turned off DMs from server members can't be asked: an owner request says so, and automatic questions skip them for 30 days.
+
 ## Tool access
 
 - Uploaded text and PDF attachments are processed directly from Discord. This works with the `read-file` plugin disabled.
