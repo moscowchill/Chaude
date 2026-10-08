@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'discord.js'
+import { Attachment, Client, GatewayIntentBits, Message, Partials, TextChannel } from 'discord.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -21,6 +21,8 @@ import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
 import { installControls, type ControlsOptions } from './controls.js'
 import { canImportHistory, historyAuthor } from './history-access.js'
+import type { IncomingDirectMessage, OutreachDiscord } from './outreach.js'
+import { createOutreachDiscord } from './outreach-discord.js'
 import { WelcomeService, type WelcomeConfig } from './welcome.js'
 
 export interface ConnectorOptions {
@@ -29,6 +31,8 @@ export interface ConnectorOptions {
   maxBackoffMs: number
   welcome?: WelcomeConfig
   ignoreWebhooks?: boolean
+  /** Receive direct messages (for member outreach). They never reach the agent loop. */
+  directMessages?: boolean
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 500_000  // ~500 KB raw text (summarizer handles oversized docs)
@@ -84,10 +88,21 @@ export interface FetchContextParams {
 export class DiscordConnector {
   private client: Client
   private welcomeService?: WelcomeService
+  private directMessageHandler?: (message: IncomingDirectMessage) => void
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
   async installControls(options: ControlsOptions): Promise<void> {
     await installControls(this.client, options)
+  }
+
+  /** Discord access for member outreach */
+  outreachDiscord(): OutreachDiscord {
+    return createOutreachDiscord(this.client)
+  }
+
+  /** Receives direct messages from users; needs the `directMessages` option */
+  setDirectMessageHandler(handler: (message: IncomingDirectMessage) => void): void {
+    this.directMessageHandler = handler
   }
 
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
@@ -105,7 +120,10 @@ export class DiscordConnector {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
         ...(options.welcome ? [GatewayIntentBits.GuildMembers] : []),
+        ...(options.directMessages ? [GatewayIntentBits.DirectMessages] : []),
       ],
+      // DM channels aren't cached after a restart; without this partial their messages are dropped
+      ...(options.directMessages ? { partials: [Partials.Channel] } : {}),
     })
 
     if (options.welcome) {
@@ -1522,6 +1540,20 @@ export class DiscordConnector {
     })
 
     this.client.on('messageCreate', (message) => {
+      // Direct messages never reach the agent loop; member outreach handles them when it's on
+      if (!message.guildId) {
+        if (!message.author.bot && this.directMessageHandler) {
+          this.directMessageHandler({
+            id: message.id,
+            channelId: message.channelId,
+            authorId: message.author.id,
+            authorName: message.author.globalName ?? message.author.username,
+            content: message.content,
+            attachments: [...message.attachments.values()].map((attachment) => attachment.url),
+          })
+        }
+        return
+      }
       logger.debug(
         {
           messageId: message.id,
@@ -1542,6 +1574,7 @@ export class DiscordConnector {
     })
 
     this.client.on('messageUpdate', (oldMsg, newMsg) => {
+      if (!newMsg.guildId) return
       this.queue.push({
         type: 'edit',
         channelId: newMsg.channelId,
@@ -1552,6 +1585,7 @@ export class DiscordConnector {
     })
 
     this.client.on('messageDelete', (message) => {
+      if (!message.guildId) return
       this.queue.push({
         type: 'delete',
         channelId: message.channelId,
