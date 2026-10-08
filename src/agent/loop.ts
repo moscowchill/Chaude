@@ -1461,6 +1461,7 @@ export class AgentLoop {
             top_p: 1,
             effort: request.effort,
             thinking: request.thinking,
+            outputSchema: request.outputSchema,
           })
           // Extract text from content blocks
           const text = completion.content
