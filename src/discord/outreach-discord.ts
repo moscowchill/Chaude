@@ -82,9 +82,11 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
       const users = [...message.mentions.users.values()]
       const replied = message.mentions.repliedUser
       if (replied && !users.some((user) => user.id === replied.id)) users.push(replied)
+      const self = client.user?.id
       return {
         authorId: message.author.id,
         content: message.content,
+        addressesBot: self !== undefined && (message.mentions.users.has(self) || replied?.id === self),
         mentions: users.map((user) => ({
           id: user.id,
           name: message.mentions.members?.get(user.id)?.displayName ?? user.globalName ?? user.username,

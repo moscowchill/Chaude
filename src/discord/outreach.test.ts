@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  asksToStop,
   cleanDraft,
   DirectMessagesClosedError,
   loadOutreachConfig,
@@ -14,6 +15,7 @@ import {
   type OutreachComplete,
   type OutreachDiscord,
   type OutreachMember,
+  who,
 } from './outreach.js'
 import { splitMessage } from './outreach-discord.js'
 import outreachPlugin from '../tools/plugins/outreach.js'
@@ -64,6 +66,7 @@ function fakeDiscord(overrides: Partial<OutreachDiscord> = {}) {
       authorId: ownerId,
       content: `<@${botId}> ask builder, helperbot, owner or nobody how things are going`,
       mentions: [members[memberId]!],
+      addressesBot: true,
     }),
     publicMessages: async () => [],
     sendDirect: async (userId, content) => {
@@ -108,6 +111,7 @@ const dm = (content: string, authorId = memberId): IncomingDirectMessage => ({
   channelId: dmChannelId,
   authorId,
   authorName: members[authorId]?.name ?? 'Someone',
+  authorUsername: members[authorId]?.username ?? 'someone',
   content,
   attachments: [],
 })
@@ -146,6 +150,43 @@ describe('member outreach config', () => {
       dailyLimit: 1,
       cooldownDays: 30,
     })
+  })
+})
+
+describe('asking to stop', () => {
+  it.each([
+    'stop',
+    'Stop.',
+    'STOP!!',
+    'please stop',
+    'stop it',
+    'stop messaging me',
+    'stop dming me',
+    "don't message me again",
+    'never contact me again',
+    'no more messages please',
+    'remove me',
+    'not interested, stop',
+    'Please leave me alone',
+  ])('catches %j', (text) => {
+    expect(asksToStop(text)).toBe(true)
+  })
+
+  it.each([
+    'We had to stop the node before the migration.',
+    'It stopped crashing after the fix.',
+    'Going well, shipping Friday.',
+    'No more blockers, the indexer is done.',
+  ])('lets an answer through: %j', (text) => {
+    expect(asksToStop(text)).toBe(false)
+  })
+})
+
+describe('member labels for the owner', () => {
+  it('drop markdown from display names and add the username', () => {
+    expect(who('**Owner**', 'mallory')).toBe('**Owner** (`@mallory`)')
+    expect(who('a_b `c`\n# d', 'ab.c')).toBe('**ab c d** (`@ab.c`)')
+    expect(who('***', 'only_user')).toBe('**only_user** (`@only_user`)')
   })
 })
 
@@ -203,7 +244,12 @@ describe('owner requests', () => {
 
   it('come only from the owner, as Discord reports the triggering message', async () => {
     const { discord, sent } = fakeDiscord({
-      message: async () => ({ authorId: otherId, content: 'ask builder', mentions: [members[memberId]!] }),
+      message: async () => ({
+        authorId: otherId,
+        content: 'ask builder',
+        mentions: [members[memberId]!],
+        addressesBot: true,
+      }),
     })
     const complete = fakeModel({ message: QUESTION })
     const outreach = service({ discord, complete })
@@ -252,7 +298,12 @@ describe('owner requests', () => {
 
   it('go only to a member the owner named, whoever the model picks', async () => {
     const { discord, sent } = fakeDiscord({
-      message: async () => ({ authorId: ownerId, content: 'ask builder about the indexer', mentions: [] }),
+      message: async () => ({
+        authorId: ownerId,
+        content: 'ask builder about the indexer',
+        mentions: [],
+        addressesBot: true,
+      }),
     })
     const complete = fakeModel({ message: QUESTION })
     const outreach = service({ discord, complete })
@@ -261,6 +312,21 @@ describe('owner requests', () => {
     expect(complete).not.toHaveBeenCalled()
     expect(await ask(outreach, 'builder')).toContain('Sent Builder')
     expect(sent.map((message) => message.userId)).toEqual([memberId])
+  })
+
+  it('need a message addressed to the bot', async () => {
+    const { discord, sent } = fakeDiscord({
+      message: async () => ({
+        authorId: ownerId,
+        content: 'builder said the indexer is nearly done',
+        mentions: [],
+        addressesBot: false,
+      }),
+    })
+    const complete = fakeModel({ message: QUESTION })
+    expect(await ask(service({ discord, complete }))).toContain('Mention me or reply to me')
+    expect(complete).not.toHaveBeenCalled()
+    expect(sent).toEqual([])
   })
 
   it('pick the mentioned member before searching by name', async () => {
@@ -298,7 +364,7 @@ describe('replies to a question', () => {
 
     await deliver(outreach, dm('Going well, we shipped v2 last week.'))
     expect(sent.slice(1)).toEqual([
-      { userId: ownerId, content: `**Builder** answered:\n> ${QUESTION}\nGoing well, we shipped v2 last week.` },
+      { userId: ownerId, content: `**Builder** (\`@builder\`) answered:\n> ${QUESTION}\nGoing well, we shipped v2 last week.` },
       { userId: memberId, content: 'Nice! What was the hardest part?' },
     ])
     const replyRequest = complete.mock.calls[1]![0]
@@ -310,7 +376,7 @@ describe('replies to a question', () => {
     expect(sent.slice(3)).toEqual([
       {
         userId: ownerId,
-        content: '**Builder** answered the follow-up:\n> Nice! What was the hardest part?\nThe data migration.',
+        content: '**Builder** (`@builder`) answered the follow-up:\n> Nice! What was the hardest part?\nThe data migration.',
       },
       { userId: memberId, content: 'Thanks, that helps!' },
     ])
@@ -320,7 +386,7 @@ describe('replies to a question', () => {
     // Later messages still reach the owner, with a reaction and no model call
     await deliver(outreach, dm('Oh, and the docs are up now.'))
     expect(sent.slice(5)).toEqual([
-      { userId: ownerId, content: '**Builder** added:\nOh, and the docs are up now.' },
+      { userId: ownerId, content: '**Builder** (`@builder`) added:\nOh, and the docs are up now.' },
     ])
     expect(reactions).toHaveLength(1)
     expect(complete).toHaveBeenCalledTimes(3)
@@ -361,7 +427,7 @@ describe('replies to a question', () => {
     await deliver(outreach, dm('Shipping Friday.'))
 
     expect(sent.filter((message) => message.userId === ownerId)).toEqual([
-      { userId: ownerId, content: `**Builder** answered:\n> ${QUESTION}\nGoing well.\nShipping Friday.` },
+      { userId: ownerId, content: `**Builder** (\`@builder\`) answered:\n> ${QUESTION}\nGoing well.\nShipping Friday.` },
     ])
     expect(complete).toHaveBeenCalledTimes(2)
     expect(savedState().threads[memberId]).toMatchObject({ status: 'done' })
@@ -376,7 +442,10 @@ describe('replies to a question', () => {
 
     expect(sent.slice(1)).toEqual([
       { userId: memberId, content: "Got it, I won't message you again." },
-      { userId: ownerId, content: "**Builder** asked not to be messaged again, so I won't contact them." },
+      {
+        userId: ownerId,
+        content: "**Builder** (`@builder`) asked not to be messaged again, so I won't contact them. They wrote:\n> Stop.",
+      },
     ])
     await deliver(outreach, dm('hello?'))
     expect(sent).toHaveLength(3)
@@ -411,6 +480,14 @@ describe('replies to a question', () => {
     outreach.stop()
     await outreach.idle()
     expect(sent.filter((message) => message.userId === ownerId)).toHaveLength(1)
+  })
+
+  it('stay silent to the owner, who needs no pointer', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord()
+    const outreach = service({ discord, complete: fakeModel() })
+    await deliver(outreach, dm('thanks for passing that on', ownerId))
+    expect(sent).toEqual([])
   })
 
   it('get a daily pointer to the server when no question is open', async () => {
@@ -471,7 +548,7 @@ describe('automatic questions', () => {
       },
       {
         userId: ownerId,
-        content: 'I asked **Builder** about the indexer rewrite:\n> How is the indexer rewrite going?',
+        content: 'I asked **Builder** (`@builder`) about the indexer rewrite:\n> How is the indexer rewrite going?',
       },
     ])
     const request = complete.mock.calls[0]![0]
@@ -496,6 +573,24 @@ describe('automatic questions', () => {
 
     expect(complete).toHaveBeenCalledTimes(3)
     expect(sent).toEqual([])
+  })
+
+  it('count the question before sending, so a failed send means no second one that day', async () => {
+    let now = T0
+    const sendDirect = vi.fn(async () => {
+      throw new Error('network down')
+    })
+    const { discord } = fakeDiscord({ publicMessages: async () => talk(memberId, 6, T0 - HOUR), sendDirect })
+    const complete = vi.fn<OutreachComplete>().mockResolvedValue({
+      text: JSON.stringify({ ask: true, topic: 'the indexer', message: 'How is the indexer going?' }),
+      stopReason: 'end_turn',
+    })
+    const outreach = service({ discord, complete, now: () => now })
+    await outreach.tick()
+    now = T0 + 2 * HOUR
+    await outreach.tick()
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(sendDirect).toHaveBeenCalledTimes(1)
   })
 
   it('leave a member alone during the cooldown', async () => {
@@ -537,7 +632,7 @@ describe('outreach state', () => {
     await deliver(restarted, dm('Going well.'))
     expect(sent[0]).toEqual({
       userId: ownerId,
-      content: `**Builder** answered:\n> ${QUESTION}\nGoing well.`,
+      content: `**Builder** (\`@builder\`) answered:\n> ${QUESTION}\nGoing well.`,
     })
   })
 

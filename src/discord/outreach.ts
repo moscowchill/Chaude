@@ -37,8 +37,15 @@ const SCAN_CACHE_MS = 10 * MINUTE_MS
 const TICK_MS = 10 * MINUTE_MS
 const MAX_DRAFT_LENGTH = 1000
 const MAX_REPLY_INPUT = 4000
-const STOP =
-  /^\s*(?:stop|unsubscribe|opt[\s-]?out|leave me alone|(?:please\s+)?(?:do not|don'?t)\s+(?:message|dm|contact)\s+me(?:\s+again)?)[\s.!]*$/i
+/** Ways of saying "don't message me". A false match only ends the bot's messages, and
+ * the member's text still reaches the owner. */
+const STOP = [
+  /^\s*(?:please\s+)?(?:stop|unsubscribe|opt[\s-]?out|remove me)\b/i,
+  /(?:^|[,.;!]\s*)(?:please\s+)?stop(?:\s+(?:it|now|please))?[\s.!]*$/i,
+  /\b(?:don'?t|do not|never|stop|quit)\s+(?:messag|dm|contact|text|writ|ping|bother)\w*(?:\s+to)?\s+me\b/i,
+  /\b(?:leave me alone|no more (?:messages|dms))\b/i,
+]
+export const asksToStop = (text: string) => STOP.some((pattern) => pattern.test(text))
 /** Links, invites and pings never go out in a DM the model wrote */
 const UNSAFE = /https?:\/\/|www\.|discord(?:app)?\.(?:gg|com\/invite)|@everyone|@here|<[@#][!&]?\d+>/i
 
@@ -116,6 +123,8 @@ export interface IncomingDirectMessage {
   channelId: string
   authorId: string
   authorName: string
+  /** Unique Discord username; display names can be anything, including the owner's */
+  authorUsername: string
   content: string
   /** Attachment URLs */
   attachments: string[]
@@ -131,7 +140,16 @@ export interface OutreachDiscord {
   message(
     channelId: string,
     messageId: string
-  ): Promise<{ authorId: string; content: string; mentions: OutreachMember[] } | undefined>
+  ): Promise<
+    | {
+        authorId: string
+        content: string
+        mentions: OutreachMember[]
+        /** The message mentions the bot or replies to it */
+        addressesBot: boolean
+      }
+    | undefined
+  >
   /** Recent messages in the server's public text channels */
   publicMessages(guildId: string): Promise<OutreachChannelMessage[]>
   /** Throws DirectMessagesClosedError when the user doesn't accept DMs from the bot */
@@ -297,6 +315,16 @@ export function namesMember(content: string, member: OutreachMember): boolean {
     const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     return new RegExp(`(?:^|[^\\p{L}\\p{N}_])@?${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'u').test(text)
   })
+}
+
+/** How a member appears to the owner: display name without markdown, plus the unique username */
+export function who(name: string, username: string): string {
+  const plain = name
+    .replace(/[\\*_~`|>#[\]()<]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 64)
+  return `**${plain || username}** (\`@${username}\`)`
 }
 
 const quote = (text: string) =>
@@ -496,6 +524,10 @@ export class OutreachService {
     if (!trigger || trigger.authorId !== this.config.ownerId) {
       return 'Only the bot owner can have me message members. Nothing was sent.'
     }
+    // Only a message addressed to the bot is a request; one it merely saw is not
+    if (!trigger.addressesBot) {
+      return 'Mention me or reply to me with the request to have me message a member. Nothing was sent.'
+    }
     if (!request.trim()) return 'Say what to ask. Nothing was sent.'
     this.rollDay()
     if (this.state.requests >= MAX_REQUESTS_PER_DAY) {
@@ -604,14 +636,15 @@ export class OutreachService {
     const thread = this.state.threads[userId]
     const isOwner = userId === this.config.ownerId
 
+    const label = who(first.authorName, first.authorUsername)
     // Someone who opted out hears nothing more from the bot
     if (this.state.optedOut[userId]) return
-    if (!isOwner && STOP.test(text)) {
-      await this.optOut(userId, first.authorName, Boolean(thread))
+    if (!isOwner && asksToStop(text)) {
+      await this.optOut(userId, label, thread ? text : undefined)
       return
     }
     if (thread?.status === 'open') {
-      await this.answer(userId, first.authorName, thread, text)
+      await this.answer(userId, first.authorName, label, thread, text)
       return
     }
     if (
@@ -621,13 +654,14 @@ export class OutreachService {
     ) {
       thread.relayed++
       this.save()
-      await this.relay(`**${first.authorName}** added:\n${text}`)
+      await this.relay(`${label} added:\n${text}`)
       await this.discord.react(last.channelId, last.id, '✅').catch((error: unknown) => {
         logger.warn({ err: error }, 'Could not react to a direct message')
       })
       return
     }
-    // Anyone else gets one pointer back to the server a day
+    // Anyone else gets one pointer back to the server a day; the owner needs none
+    if (isOwner) return
     if (now - (this.state.autoReplies[userId] ?? 0) < DAY_MS) return
     const today = Object.values(this.state.autoReplies).filter((at) => now - at < DAY_MS)
     if (today.length >= MAX_AUTO_REPLIES_PER_DAY) return
@@ -640,7 +674,13 @@ export class OutreachService {
     )
   }
 
-  private async answer(userId: string, name: string, thread: Thread, text: string): Promise<void> {
+  private async answer(
+    userId: string,
+    name: string,
+    label: string,
+    thread: Thread,
+    text: string
+  ): Promise<void> {
     const owner = await this.ownerName()
     const asked = thread.followUp ?? thread.question
     const followUpAllowed = thread.followUp === undefined
@@ -648,12 +688,13 @@ export class OutreachService {
     thread.lastActivityAt = this.now()
     this.save()
     await this.relay(
-      `**${name}** answered${followUpAllowed ? '' : ' the follow-up'}:\n${quote(asked)}\n${text}`
+      `${label} answered${followUpAllowed ? '' : ' the follow-up'}:\n${quote(asked)}\n${text}`
     )
 
     const reply = await this.replyTo(name, owner, asked, text, followUpAllowed)
     if (reply.optOut) {
-      await this.optOut(userId, name, true)
+      // The answer already reached the owner above
+      await this.optOut(userId, label, '')
       return
     }
     if (followUpAllowed && reply.followUp) thread.followUp = reply.message
@@ -705,13 +746,17 @@ export class OutreachService {
     }
   }
 
-  private async optOut(userId: string, name: string, notifyOwner: boolean): Promise<void> {
+  /** `text` is relayed to the owner along with the notice; undefined means the owner isn't told */
+  private async optOut(userId: string, label: string, text: string | undefined): Promise<void> {
     this.state.optedOut[userId] = this.now()
     const thread = this.state.threads[userId]
     if (thread) thread.status = 'done'
     this.save()
     await this.sendQuietly(userId, "Got it, I won't message you again.")
-    if (notifyOwner) await this.relay(`**${name}** asked not to be messaged again, so I won't contact them.`)
+    if (text !== undefined) {
+      const notice = `${label} asked not to be messaged again, so I won't contact them.`
+      await this.relay(text ? `${notice} They wrote:\n${quote(text)}` : notice)
+    }
     logger.info({ userId }, 'Member opted out of outreach')
   }
 
@@ -777,6 +822,9 @@ export class OutreachService {
         continue
       }
       now = this.now()
+      // Counted before the send, so a crash right after it can't lead to a second question today
+      automatic.sent++
+      this.save()
       try {
         await this.discord.sendDirect(
           member.id,
@@ -785,6 +833,7 @@ export class OutreachService {
         )
       } catch (error) {
         if (!(error instanceof DirectMessagesClosedError)) throw error
+        automatic.sent--
         this.state.dmsClosed[member.id] = now
         this.save()
         continue
@@ -797,7 +846,6 @@ export class OutreachService {
         lastActivityAt: now,
         relayed: 0,
       }
-      automatic.sent++
       automatic.nextAt =
         automatic.sent < this.config.dailyLimit ? this.later(now, 2 * HOUR_MS) : null
       this.save()
@@ -806,7 +854,7 @@ export class OutreachService {
         typeof draft?.topic === 'string' && draft.topic.trim()
           ? draft.topic.trim().slice(0, 80)
           : 'their work'
-      await this.relay(`I asked **${member.name}** about ${topic}:\n${quote(text)}`)
+      await this.relay(`I asked ${who(member.name, member.username)} about ${topic}:\n${quote(text)}`)
       return
     }
   }

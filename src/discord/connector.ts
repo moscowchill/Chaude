@@ -1548,6 +1548,7 @@ export class DiscordConnector {
             channelId: message.channelId,
             authorId: message.author.id,
             authorName: message.author.globalName ?? message.author.username,
+            authorUsername: message.author.username,
             content: message.content,
             attachments: [...message.attachments.values()].map((attachment) => attachment.url),
           })

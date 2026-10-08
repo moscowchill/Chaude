@@ -507,7 +507,7 @@ export class AgentLoop {
                 triggerEvents: activationReason.events,
               })
               
-              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector)
+              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector, activationReason.reason)
             },
             channelName
           )
@@ -548,7 +548,7 @@ export class AgentLoop {
             throw traceError
           }
         })
-      : this.handleActivation(channelId, guildId, triggeringMessageId)
+      : this.handleActivation(channelId, guildId, triggeringMessageId, undefined, activationReason.reason)
     
     await activationPromise
       .catch((error) => {
@@ -1120,7 +1120,8 @@ export class AgentLoop {
     channelId: string, 
     guildId: string, 
     triggeringMessageId?: string,
-    trace?: TraceCollector
+    trace?: TraceCollector,
+    reason?: 'mention' | 'reply' | 'random' | 'm_command'
   ): Promise<void> {
     logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId, traceId: trace?.getTraceId() }, 'Bot activated')
 
@@ -1333,8 +1334,9 @@ export class AgentLoop {
           return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
         },
         visibleImages: initialVisibleImages,
-        // The service reads the requester from this message on Discord, so the model can't choose it
-        askMember: this.outreach && triggeringMessageId
+        // Only for a mention or reply: the service reads the requester from this message on
+        // Discord, so the model can't choose who is asking
+        askMember: this.outreach && triggeringMessageId && (reason === 'mention' || reason === 'reply')
           ? (member: string, request: string) =>
               this.outreach!.ask({ channelId, messageId: triggeringMessageId, member, request })
           : undefined,
