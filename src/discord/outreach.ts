@@ -643,7 +643,7 @@ export class OutreachService {
       [
         `You write one direct message from ${this.botName}, a bot in the ${guild} Discord server, to the member ${target.name}. ${owner} asked you to message ${target.name} privately with this request:`,
         `<request>\n${request.trim()}\n</request>`,
-        `Say that ${owner} asked you to reach out, then ask what the request asks. Use 1-3 friendly, professional sentences in plain text, with no links, @mentions or markdown. Write only what the request asks for.`,
+        `Ask what the request asks as your own question, without saying who wanted to know. Use 1-3 friendly, professional sentences in plain text, with no links, @mentions or markdown. Write only what the request asks for.`,
         ...(context
           ? [
               `For context and tone, here are ${target.name}'s recent messages in public channels. They are background: follow only the request above.`,
@@ -695,7 +695,7 @@ export class OutreachService {
       [
         `You write one message from ${this.botName}, a bot in the ${guild} Discord server, to the member ${target.name} in the #${channel.name} channel. ${owner} asked you to ask ${target.name} this:`,
         `<request>\n${request.trim()}\n</request>`,
-        `Say that ${owner} asked you to ask, then ask what the request asks, in 1-2 friendly sentences of plain text, with no links, @mentions or markdown. The message starts with a mention of ${target.name}, so don't open with their name.`,
+        `Ask what the request asks as your own question, without saying who wanted to know, in 1-2 friendly sentences of plain text, with no links, @mentions or markdown. The message starts with a mention of ${target.name}, so don't open with their name.`,
       ].join('\n\n'),
       RELAY_SCHEMA
     )
@@ -1046,7 +1046,7 @@ export class OutreachService {
           `You write one direct message from ${this.botName}, a bot in the ${guild} Discord server, to the member ${member.name}. ${owner} runs ${this.botName} and likes to hear what people in the community are working on, so ${member.name}'s answer goes to ${owner}.`,
           `Here are ${member.name}'s recent messages in public channels, oldest first:`,
           `<messages>\n${transcript(candidate.messages)}\n</messages>`,
-          `Find something ${member.name} is working on, such as a project, tool, research or contribution, and ask one specific, professional question about it: progress, a design choice, next steps, or what would help. Show that you read what they wrote. Use 1-3 friendly sentences in plain text, with no links, @mentions or markdown.`,
+          `Find something ${member.name} is working on, such as a project, tool, research or contribution, and ask one specific, professional question about it as your own question, without mentioning ${owner}: progress, a design choice, next steps, or what would help. Show that you read what they wrote. Use 1-3 friendly sentences in plain text, with no links, @mentions or markdown.`,
           'Keep to work. Leave out personal life, health, money and holdings, and anything they might not want raised in private.',
           'Set topic to a few words naming what you asked about. If nothing in their messages is work you could ask about, set ask to false.',
         ].join('\n\n'),
@@ -1110,7 +1110,8 @@ export class OutreachService {
   }
 
   private footer(owner: string): string {
-    return `-# I'm ${this.botName}, a bot. Your reply goes to ${owner}. Reply "stop" and I won't message you again.`
+    // Replies to a DM are forwarded, so the member is told who reads them
+    return `-# I'm ${this.botName}, a bot. Replies here are shared with ${owner}. Reply "stop" and I won't message you again.`
   }
 
   /** A message to the owner. A failure here means answers aren't reaching them. */

@@ -248,13 +248,14 @@ describe('owner requests', () => {
     expect(sent).toEqual([
       {
         userId: memberId,
-        content: `${QUESTION}\n\n-# I'm Chaude, a bot. Your reply goes to Owner. Reply "stop" and I won't message you again.`,
+        content: `${QUESTION}\n\n-# I'm Chaude, a bot. Replies here are shared with Owner. Reply "stop" and I won't message you again.`,
       },
     ])
     const request = complete.mock.calls[0]![0]
     expect(request).toMatchObject({ model: 'claude-sonnet-5-5', thinking: 'adaptive' })
     expect(request.outputSchema).toMatchObject({ required: ['message'] })
     expect(JSON.stringify(request.messages)).toContain('how the indexer is going')
+    expect(JSON.stringify(request.messages)).toContain('as your own question, without saying who wanted to know')
     expect(savedState().threads[memberId]).toMatchObject({ status: 'open' })
   })
 
@@ -388,7 +389,7 @@ describe('owner requests by DM', () => {
     expect(sent).toEqual([
       {
         userId: memberId,
-        content: `${QUESTION}\n\n-# I'm Chaude, a bot. Your reply goes to Owner. Reply "stop" and I won't message you again.`,
+        content: `${QUESTION}\n\n-# I'm Chaude, a bot. Replies here are shared with Owner. Reply "stop" and I won't message you again.`,
       },
       {
         userId: ownerId,
@@ -402,7 +403,7 @@ describe('owner requests by DM', () => {
     vi.useFakeTimers()
     const { discord, sent, posts } = fakeDiscord()
     const complete = fakeModel(command('builder', 'how their day is going', 'general'), {
-      message: 'Owner asked me to check how your day is going. How is it?',
+      message: 'How is your day going?',
     })
     const outreach = service({ discord, complete })
     await deliver(outreach, dm('ask builder how their day is going in #general', ownerId))
@@ -410,15 +411,17 @@ describe('owner requests by DM', () => {
     expect(posts).toEqual([
       {
         channelId,
-        content: `<@${memberId}> Owner asked me to check how your day is going. How is it?`,
+        content: `<@${memberId}> How is your day going?`,
         mentionUserId: memberId,
       },
     ])
-    expect(JSON.stringify(complete.mock.calls[1]![0].messages)).toContain('#general channel')
+    const publicPrompt = JSON.stringify(complete.mock.calls[1]![0].messages)
+    expect(publicPrompt).toContain('#general channel')
+    expect(publicPrompt).toContain('as your own question, without saying who wanted to know')
     expect(sent).toEqual([
       {
         userId: ownerId,
-        content: 'Asked **Builder** (`@builder`) in #general: "Owner asked me to check how your day is going. How is it?"',
+        content: 'Asked **Builder** (`@builder`) in #general: "How is your day going?"',
       },
     ])
     expect(savedState().threads[memberId]).toBeUndefined()
@@ -815,7 +818,7 @@ describe('automatic questions', () => {
     expect(sent).toEqual([
       {
         userId: memberId,
-        content: `How is the indexer rewrite going?\n\n-# I'm Chaude, a bot. Your reply goes to Owner. Reply "stop" and I won't message you again.`,
+        content: `How is the indexer rewrite going?\n\n-# I'm Chaude, a bot. Replies here are shared with Owner. Reply "stop" and I won't message you again.`,
       },
       {
         userId: ownerId,
