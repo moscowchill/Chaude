@@ -2,6 +2,7 @@ import {
   ChannelType,
   type Client,
   DiscordAPIError,
+  GatewayIntentBits,
   type GuildMember,
   type NewsChannel,
   PermissionFlagsBits,
@@ -9,6 +10,7 @@ import {
 } from 'discord.js'
 import {
   DirectMessagesClosedError,
+  normalizedName,
   type OutreachChannelMessage,
   type OutreachDiscord,
   type OutreachMember,
@@ -70,8 +72,46 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
 
     async findMembers(guildId, query) {
       const guild = await client.guilds.fetch(guildId)
-      const members = await guild.members.fetch({ query, limit: 10 })
+      // With the Server Members intent the whole list is available, display names included;
+      // without it Discord only searches username and nickname prefixes
+      if (client.options.intents.has(GatewayIntentBits.GuildMembers)) {
+        return [...(await guild.members.fetch()).values()].map(toMember)
+      }
+      const members = await guild.members.fetch({ query, limit: 25 })
       return [...members.values()].map(toMember)
+    },
+
+    async channels(guildId, name) {
+      const guild = await client.guilds.fetch(guildId)
+      const me = await guild.members.fetchMe()
+      const id = /^<#(\d{17,20})>$/.exec(name.trim())?.[1]
+      const wanted = normalizedName(name)
+      return [...(await guild.channels.fetch()).values()]
+        .filter(
+          (channel): channel is TextChannel | NewsChannel =>
+            (channel?.type === ChannelType.GuildText ||
+              channel?.type === ChannelType.GuildAnnouncement) &&
+            (id ? channel.id === id : Boolean(wanted) && normalizedName(channel.name) === wanted) &&
+            channel
+              .permissionsFor(me)
+              .has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])
+        )
+        .map((channel) => ({ id: channel.id, name: channel.name }))
+    },
+
+    async sendToChannel(channelId, content, mentionUserId, nonce) {
+      const channel = await client.channels.fetch(channelId)
+      if (!channel?.isTextBased() || channel.isDMBased()) {
+        throw new Error('Outreach can only post in a server text channel')
+      }
+      for (const [index, part] of splitMessage(content).entries()) {
+        await channel.send({
+          content: part,
+          allowedMentions: { parse: [], users: [mentionUserId] },
+          nonce: `${nonce}${index}`.slice(0, 25),
+          enforceNonce: true,
+        })
+      }
     },
 
     async message(channelId, messageId) {
@@ -122,6 +162,7 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
             authorId: message.author.id,
             authorName:
               message.member?.displayName ?? message.author.globalName ?? message.author.username,
+            authorUsername: message.author.username,
             isBot: message.author.bot,
             channelName: channel.name,
             content: message.content,

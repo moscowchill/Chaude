@@ -30,6 +30,8 @@ const MIN_RETENTION_MS = 90 * DAY_MS
 /** DMs sent in quick succession are read as one reply, after a quiet spell or at most a minute */
 const SETTLE_MS = 15 * 1000
 const MAX_SETTLE_MS = 60 * 1000
+/** The owner's DMs are instructions, so they settle briefly */
+const OWNER_SETTLE_MS = 3 * 1000
 const MAX_PENDING = 20
 /** Pointers back to the server per day across all users, so a DM flood can't make the bot spam */
 const MAX_AUTO_REPLIES_PER_DAY = 50
@@ -113,6 +115,7 @@ export interface OutreachMember {
 export interface OutreachChannelMessage {
   authorId: string
   authorName: string
+  authorUsername: string
   isBot: boolean
   channelName: string
   content: string
@@ -136,7 +139,13 @@ export interface OutreachDiscord {
   guildName(guildId: string): Promise<string>
   /** Undefined when the user isn't a member of the server */
   member(guildId: string, userId: string): Promise<OutreachMember | undefined>
+  /** Members whose username or nickname starts with the query; every member when the bot
+   * has the Server Members intent, which also covers display names */
   findMembers(guildId: string, query: string): Promise<OutreachMember[]>
+  /** Text channels the bot can post in, matched by name (case and symbols ignored) or <#id> */
+  channels(guildId: string, name: string): Promise<OutreachChannel[]>
+  /** Posts in a server channel, pinging only `mentionUserId` */
+  sendToChannel(channelId: string, content: string, mentionUserId: string, nonce: string): Promise<void>
   /** Author, text, and mentioned or replied-to users of a server message, read from Discord */
   message(
     channelId: string,
@@ -156,6 +165,11 @@ export interface OutreachDiscord {
   /** Throws DirectMessagesClosedError when the user doesn't accept DMs from the bot */
   sendDirect(userId: string, content: string, nonce: string): Promise<void>
   react(channelId: string, messageId: string, emoji: string): Promise<void>
+}
+
+export interface OutreachChannel {
+  id: string
+  name: string
 }
 
 export class DirectMessagesClosedError extends Error {
@@ -328,6 +342,38 @@ export function who(name: string, username: string): string {
   return `**${plain || username}** (\`@${username}\`)`
 }
 
+/** Lowercase letters and digits only, so "Nova Dev 🛡" and "novadev" compare equal */
+export const normalizedName = (text: string) =>
+  text.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]/gu, '')
+
+/**
+ * The members whose names best match a loosely typed name: exact username, then exact
+ * display name, then a prefix, then a part of either. Only the top rank is returned, so a
+ * tie means the owner has to say which one.
+ */
+export function bestMatches(query: string, members: OutreachMember[]): OutreachMember[] {
+  const wanted = normalizedName(query)
+  if (!wanted) return []
+  const score = (member: OutreachMember) => {
+    const username = normalizedName(member.username)
+    const name = normalizedName(member.name)
+    if (username === wanted) return 4
+    if (name === wanted) return 3
+    if (username.startsWith(wanted) || name.startsWith(wanted)) return 2
+    if (username.includes(wanted) || name.includes(wanted)) return 1
+    return 0
+  }
+  const ranked = new Map<string, { member: OutreachMember; score: number }>()
+  for (const member of members) {
+    if (member.isBot) continue
+    const value = score(member)
+    const known = ranked.get(member.id)
+    if (value > 0 && (!known || value > known.score)) ranked.set(member.id, { member, score: value })
+  }
+  const best = Math.max(0, ...[...ranked.values()].map((entry) => entry.score))
+  return [...ranked.values()].filter((entry) => entry.score === best).map((entry) => entry.member)
+}
+
 const quote = (text: string) =>
   text
     .split('\n')
@@ -361,6 +407,21 @@ const AUTOMATIC_SCHEMA = {
   required: ['ask', 'topic', 'message'],
   additionalProperties: false,
 }
+
+const COMMAND_SCHEMA = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['ask', 'none', 'unclear'] },
+    member: { type: 'string' },
+    question: { type: 'string' },
+    channel: { type: 'string' },
+  },
+  required: ['action', 'member', 'question', 'channel'],
+  additionalProperties: false,
+}
+
+const OWNER_HELP =
+  'To have me ask someone, write for example "ask <name> how the release went". Add "in #channel" to ask there with a mention; without it I ask by DM.'
 
 const REPLY_SCHEMA = {
   type: 'object',
@@ -470,15 +531,19 @@ export class OutreachService {
     if (entry) {
       if (entry.messages.length < MAX_PENDING) entry.messages.push(message)
       clearTimeout(entry.quiet)
-      entry.quiet = setTimeout(() => this.flush(userId), SETTLE_MS)
+      entry.quiet = setTimeout(() => this.flush(userId), this.settleFor(userId))
       return
     }
     // The deadline keeps a member who writes nonstop from being held back forever
     this.pending.set(userId, {
       messages: [message],
-      quiet: setTimeout(() => this.flush(userId), SETTLE_MS),
+      quiet: setTimeout(() => this.flush(userId), this.settleFor(userId)),
       deadline: setTimeout(() => this.flush(userId), MAX_SETTLE_MS),
     })
+  }
+
+  private settleFor(userId: string): number {
+    return userId === this.config.ownerId ? OWNER_SETTLE_MS : SETTLE_MS
   }
 
   private flush(userId: string): void {
@@ -547,6 +612,11 @@ export class OutreachService {
       return `${target.name} asked me not to message them. Nothing was sent.`
     }
 
+    return this.askByDm(target, request)
+  }
+
+  /** Drafts the question and sends it by DM; the answer comes back to the owner */
+  private async askByDm(target: OutreachMember, request: string): Promise<string> {
     const [guild, owner] = await Promise.all([this.guildName(), this.ownerName()])
     // Their public messages only add context, so the question goes out without them on a failed scan
     const recent = await this.publicMessages().catch((error: unknown) => {
@@ -596,7 +666,133 @@ export class OutreachService {
     }
     this.save()
     logger.info({ userId: target.id }, 'Sent a member question for the owner')
-    return `Sent ${target.name} this DM: "${text}" Their answer will come to you by DM.`
+    return `Sent ${who(target.name, target.username)} this DM: "${text}" Their answer will come to you by DM.`
+  }
+
+  /** Posts the question in a channel with a mention of the member; the answer stays there */
+  private async askInChannel(
+    target: OutreachMember,
+    request: string,
+    channel: OutreachChannel
+  ): Promise<string> {
+    const [guild, owner] = await Promise.all([this.guildName(), this.ownerName()])
+    this.state.requests++
+    this.save()
+    const draft = await this.draft(
+      [
+        `You write one message from ${this.botName}, a bot in the ${guild} Discord server, to the member ${target.name} in the #${channel.name} channel. ${owner} asked you to ask ${target.name} this:`,
+        `<request>\n${request.trim()}\n</request>`,
+        `Say that ${owner} asked you to ask, then ask what the request asks, in 1-2 friendly sentences of plain text, with no links, @mentions or markdown. The message starts with a mention of ${target.name}, so don't open with their name.`,
+      ].join('\n\n'),
+      RELAY_SCHEMA
+    )
+    const text = cleanDraft(draft?.message)
+    if (!text) return 'The drafted question was unusable (empty, too long, or with links or mentions). Nothing was sent.'
+    const now = this.now()
+    await this.discord.sendToChannel(
+      channel.id,
+      `<@${target.id}> ${text}`,
+      target.id,
+      nonceFor(channel.id, target.id, now, text)
+    )
+    logger.info({ userId: target.id, channelId: channel.id }, 'Asked a member in a channel for the owner')
+    return `Asked ${who(target.name, target.username)} in #${channel.name}: "${text}"`
+  }
+
+  /**
+   * A DM from the owner. Only the owner's own text is in it, so it can name a member
+   * loosely; the reply model reads it as a request and the bot confirms what it did.
+   */
+  private async ownerCommand(text: string): Promise<void> {
+    const [guild, owner] = await Promise.all([this.guildName(), this.ownerName()])
+    let command: Record<string, unknown> | undefined
+    try {
+      command = parseObject(
+        await this.complete({
+          model: this.config.replyModel,
+          max_tokens: 1024,
+          outputSchema: COMMAND_SCHEMA,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                `${owner} runs ${this.botName}, a bot in the ${guild} Discord server, and sent it this direct message:`,
+                `<message>\n${text}\n</message>`,
+                `${owner} can have the bot ask a server member something, by DM or in a channel. If the message asks for that, set action to "ask", member to the member's name exactly as written (without @), question to what to ask in ${owner}'s words, and channel to the channel name if they named one (without #), or "" for a DM. Keep the channel out of the question.`,
+                'Set action to "none" for thanks, chat or anything that needs no action, and "unclear" when they seem to want something you can\'t tell. Leave unused fields as "".',
+              ].join('\n\n'),
+            },
+          ],
+        })
+      )
+    } catch (error) {
+      logger.warn({ err: error }, 'Could not read an owner request')
+      await this.relay("I couldn't read that request just now. Try again in a minute.")
+      return
+    }
+    if (command?.action === 'none') return
+    const member = typeof command?.member === 'string' ? command.member.trim().replace(/^@/, '') : ''
+    const question = typeof command?.question === 'string' ? command.question.trim() : ''
+    const channel = typeof command?.channel === 'string' ? command.channel.trim().replace(/^#/, '') : ''
+    // The name has to come from the owner's own words, so the model can't pick someone else
+    if (command?.action !== 'ask' || !member || !question || !text.toLowerCase().includes(member.toLowerCase())) {
+      await this.relay(OWNER_HELP)
+      return
+    }
+    try {
+      await this.relay(await this.askFromOwner(member, question, channel))
+    } catch (error) {
+      logger.error({ err: error }, 'Owner request failed')
+      await this.relay('That failed with an error, so nothing may have been sent. Check the bot logs.')
+    }
+  }
+
+  private async askFromOwner(member: string, request: string, channel: string): Promise<string> {
+    this.rollDay()
+    if (this.state.requests >= MAX_REQUESTS_PER_DAY) {
+      return `Today's limit of ${MAX_REQUESTS_PER_DAY} member questions is reached. Nothing was sent.`
+    }
+    const target = await this.matchMember(member)
+    if (typeof target === 'string') return target
+    const label = who(target.name, target.username)
+    if (target.id === this.config.ownerId) return 'That is you. Nothing was sent.'
+    if (this.state.optedOut[target.id]) {
+      return `${label} asked me not to message them. Nothing was sent.`
+    }
+    if (!channel) return this.askByDm(target, request)
+    const found = await this.discord.channels(this.config.guildId, channel)
+    if (found.length === 0) return `I can't find a #${channel} channel I can post in. Nothing was sent.`
+    if (found.length > 1) return `Several channels are called #${channel}. Nothing was sent.`
+    return this.askInChannel(target, request, found[0]!)
+  }
+
+  /** A member from a loosely typed name, or a reply listing the candidates */
+  private async matchMember(input: string): Promise<OutreachMember | string> {
+    const id = /^<@!?(\d{17,20})>$/.exec(input.trim())?.[1]
+    const notMember = `No member of the server matches "${input}". Nothing was sent.`
+    if (id) return (await this.discord.member(this.config.guildId, id)) ?? notMember
+    // Discord's search covers usernames and nicknames; recent posters add display names
+    const recent = await this.publicMessages().catch(() => [])
+    const candidates = [
+      ...(await this.discord.findMembers(this.config.guildId, normalizedName(input) || input)),
+      ...recent.map((message) => ({
+        id: message.authorId,
+        name: message.authorName,
+        username: message.authorUsername,
+        isBot: message.isBot,
+      })),
+    ]
+    const matches = bestMatches(input, candidates)
+    if (matches.length === 0) return notMember
+    if (matches.length > 1) {
+      const list = matches
+        .slice(0, 5)
+        .map((member) => who(member.name, member.username))
+        .join(', ')
+      return `Several members match "${input}": ${list}. Ask again with the exact username. Nothing was sent.`
+    }
+    // A recent poster may have left since
+    return (await this.discord.member(this.config.guildId, matches[0]!.id)) ?? notMember
   }
 
   private async resolveMember(
@@ -637,10 +833,14 @@ export class OutreachService {
     const thread = this.state.threads[userId]
     const isOwner = userId === this.config.ownerId
 
+    if (isOwner) {
+      await this.ownerCommand(text)
+      return
+    }
     const label = who(first.authorName, first.authorUsername)
     // Someone who opted out hears nothing more from the bot
     if (this.state.optedOut[userId]) return
-    if (!isOwner && asksToStop(text)) {
+    if (asksToStop(text)) {
       await this.optOut(userId, label, thread ? text : undefined)
       return
     }
@@ -661,8 +861,7 @@ export class OutreachService {
       })
       return
     }
-    // Anyone else gets one pointer back to the server a day; the owner needs none
-    if (isOwner) return
+    // Anyone else gets one pointer back to the server a day
     if (now - (this.state.autoReplies[userId] ?? 0) < DAY_MS) return
     const today = Object.values(this.state.autoReplies).filter((at) => now - at < DAY_MS)
     if (today.length >= MAX_AUTO_REPLIES_PER_DAY) return
