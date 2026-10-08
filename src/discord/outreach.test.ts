@@ -396,6 +396,23 @@ describe('replies to a question', () => {
     expect(savedState().threads[memberId]).toMatchObject({ status: 'done' })
   })
 
+  it('are handled on shutdown instead of dropped', async () => {
+    vi.useFakeTimers()
+    const { discord, sent } = fakeDiscord()
+    const outreach = service({
+      discord,
+      complete: fakeModel(
+        { message: QUESTION },
+        { action: 'acknowledge', message: 'Thanks!', opt_out: false }
+      ),
+    })
+    await ask(outreach)
+    outreach.onDirectMessage(dm('Answer right before a restart.'))
+    outreach.stop()
+    await outreach.idle()
+    expect(sent.filter((message) => message.userId === ownerId)).toHaveLength(1)
+  })
+
   it('get a daily pointer to the server when no question is open', async () => {
     vi.useFakeTimers()
     const { discord, sent } = fakeDiscord()

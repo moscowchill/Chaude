@@ -31,6 +31,8 @@ const MIN_RETENTION_MS = 90 * DAY_MS
 const SETTLE_MS = 15 * 1000
 const MAX_SETTLE_MS = 60 * 1000
 const MAX_PENDING = 20
+/** Pointers back to the server per day across all users, so a DM flood can't make the bot spam */
+const MAX_AUTO_REPLIES_PER_DAY = 50
 const SCAN_CACHE_MS = 10 * MINUTE_MS
 const TICK_MS = 10 * MINUTE_MS
 const MAX_DRAFT_LENGTH = 1000
@@ -407,14 +409,11 @@ export class OutreachService {
     this.timer.unref?.()
   }
 
+  /** Stops the timer and hands replies still settling to the queue; await idle() after */
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = undefined
-    for (const { quiet, deadline } of this.pending.values()) {
-      clearTimeout(quiet)
-      clearTimeout(deadline)
-    }
-    this.pending.clear()
+    for (const userId of [...this.pending.keys()]) this.flush(userId)
   }
 
   /** Resolves once queued work has finished */
@@ -630,6 +629,8 @@ export class OutreachService {
     }
     // Anyone else gets one pointer back to the server a day
     if (now - (this.state.autoReplies[userId] ?? 0) < DAY_MS) return
+    const today = Object.values(this.state.autoReplies).filter((at) => now - at < DAY_MS)
+    if (today.length >= MAX_AUTO_REPLIES_PER_DAY) return
     this.state.autoReplies[userId] = now
     this.save()
     const guild = await this.guildName()
