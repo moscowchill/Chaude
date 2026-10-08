@@ -160,6 +160,18 @@ describe('Anthropic provider with Claude Opus 5.5', () => {
   })
 })
 
+describe('Anthropic provider structured output', () => {
+  const schema = { type: 'object', properties: { selected: { type: 'array', items: { type: 'integer' } } }, required: ['selected'] }
+  it('sends the schema as output_config.format, next to an effort', async () => {
+    await new AnthropicProvider('key').complete(request('claude-haiku-5-5', { outputSchema: schema, effort: 'low' }))
+    expect(sdk.stream.mock.calls[0][0].output_config).toEqual({ effort: 'low', format: { type: 'json_schema', schema } })
+  })
+  it('leaves it out for a model without structured output', async () => {
+    await new AnthropicProvider('key').complete(request('claude-sonnet-4-20250514', { outputSchema: schema }))
+    expect(sdk.stream.mock.calls[0][0]).not.toHaveProperty('output_config')
+  })
+})
+
 describe('Anthropic provider with Claude Opus 4.6', () => {
   it('sends the temperature without thinking and drops it with thinking on', async () => {
     await new AnthropicProvider('key').complete(request('claude-opus-4-6'))

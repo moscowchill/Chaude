@@ -30,6 +30,8 @@ export interface AnthropicModelRules {
   defaultThinking?: 'disabled'
   /** Server-side refusal fallback is available */
   serverFallback: boolean
+  /** `output_config.format` with a JSON schema (structured output) is accepted */
+  structuredOutputs: boolean
 }
 
 const DEFAULT_SAMPLING_ONLY = /^claude-(?:haiku-5|sonnet-5|opus-5|opus-4-[78]|fable-|mythos-)/
@@ -37,6 +39,7 @@ const CURRENT_FAMILY = /^claude-(?:haiku-5|sonnet-5|opus-5|opus-4-[678]|sonnet-4
 const ALWAYS_THINKS = /^claude-(?:opus-5-5|sonnet-5-5|fable-|mythos-)/
 const THINKING_OFF_BY_DEFAULT = /^claude-haiku-5-5(?:$|-)/
 const SERVER_FALLBACK = /^claude-(?:opus-5|sonnet-5-5|fable-5-1)(?:$|-)/
+const STRUCTURED_OUTPUTS = /^claude-(?:haiku-5|sonnet-5|opus-5|opus-4-[5678]|sonnet-4-[56]|haiku-4-5|fable-|mythos-)/
 
 export function anthropicModelRules(model: string): AnthropicModelRules {
   const current = CURRENT_FAMILY.test(model)
@@ -47,6 +50,7 @@ export function anthropicModelRules(model: string): AnthropicModelRules {
     canDisableThinking: current && !ALWAYS_THINKS.test(model),
     ...(THINKING_OFF_BY_DEFAULT.test(model) ? { defaultThinking: 'disabled' as const } : {}),
     serverFallback: SERVER_FALLBACK.test(model),
+    structuredOutputs: STRUCTURED_OUTPUTS.test(model),
   }
 }
 

@@ -142,8 +142,15 @@ export class AnthropicProvider implements LLMProvider {
       if (thinking) {
         params.thinking = thinking
       }
+      const outputConfig: Record<string, unknown> = {}
       if (request.effort && rules.adaptiveThinking) {
-        params.output_config = { effort: request.effort }
+        outputConfig.effort = request.effort
+      }
+      if (request.outputSchema && rules.structuredOutputs) {
+        outputConfig.format = { type: 'json_schema', schema: request.outputSchema }
+      }
+      if (Object.keys(outputConfig).length > 0) {
+        params.output_config = outputConfig
       }
       // Where available, a server-side fallback model answers a request that a safety
       // classifier declines (routed by refusal category)

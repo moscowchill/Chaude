@@ -153,6 +153,8 @@ export interface PluginLLMRequest {
   effort?: Effort
   /** Anthropic API thinking; unset uses the provider's per-model default */
   thinking?: ThinkingMode
+  /** JSON schema the reply must match, on models with structured output; others get plain text */
+  outputSchema?: Record<string, unknown>
 }
 
 /**

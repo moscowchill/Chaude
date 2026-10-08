@@ -396,6 +396,36 @@ async function getRecentContextPreview(context: PluginStateContext): Promise<str
   return `(No conversation preview available yet - channel: ${context.channelId})`
 }
 
+/** Structured-output schema for the selection reply: the 1-based numbers of the picks */
+const SELECTION_SCHEMA = {
+  type: 'object',
+  properties: { selected: { type: 'array', items: { type: 'integer' } } },
+  required: ['selected'],
+  additionalProperties: false,
+}
+
+/**
+ * The 1-based numbers a selection reply picks, or 'none'. Reads the JSON object
+ * (structured output, or JSON wrapped in prose or a code fence by a model without it),
+ * then the older text forms "1, 3, 5" and "NONE".
+ */
+export function parseSelection(text: string): number[] | 'none' {
+  const object = /\{[^{}]*\}/.exec(text)?.[0]
+  if (object) {
+    try {
+      const parsed = JSON.parse(object) as { selected?: unknown }
+      if (Array.isArray(parsed.selected)) {
+        if (parsed.selected.length === 0) return 'none'
+        return parsed.selected.filter((n): n is number => typeof n === 'number')
+      }
+    } catch {
+      // Braces without valid JSON: read it as the older text form
+    }
+  }
+  if (text === 'NONE') return 'none'
+  return text.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n))
+}
+
 /**
  * Use LLM to select relevant cabinets and summaries based on current conversation.
  * Cabinets are compact (one line per category) so the prompt stays small even with many notes.
@@ -457,33 +487,32 @@ Select up to ${maxCabinetSelections} cabinets and up to ${maxSummarySelections} 
 Prioritize: cabinets about active topics/tasks > topic-relevant summaries > general background.
 Always include cabinets about ongoing commitments or unresolved items if relevant.
 
-Respond with ONLY the numbers, comma-separated. Example: 1, 3, 5
-If none are relevant, respond: NONE`
+Respond with the numbers of your picks as JSON, for example {"selected": [1, 3, 5]}.
+If none are relevant, respond {"selected": []}.`
 
-    // With thinking off, Claude Haiku 5.5 reasons in the visible reply ("The latest
-    // message is a greeting...") and hits the cap before any numbers, so selection
-    // silently picks nothing. Thinking at low effort keeps the reply to the numbers.
+    // Structured output: free text let Claude Haiku 5.5 explain its choice in prose,
+    // with or without thinking, and the parser picked stray numbers out of it. The
+    // schema forces a list of numbers. The headroom is for a model that always thinks.
     const response = await context.llmComplete({
       model,
       max_tokens: 1024,
-      thinking: 'adaptive',
-      effort: 'low',
+      outputSchema: SELECTION_SCHEMA,
       messages: [{ role: 'user', content: prompt }],
     })
 
     const text = response.text.trim()
-    if (text === 'NONE') {
-      return { summaries: [], cabinets: [] }
-    }
-    // A cut-off or wordy reply would silently select nothing: take the fallback below
+    // A cut-off or unusable reply would select nothing: take the fallback below
     if (response.stopReason === 'max_tokens') {
       throw new Error('selection reply was cut off at max_tokens')
     }
+    const picks = parseSelection(text)
+    if (picks === 'none') {
+      return { summaries: [], cabinets: [] }
+    }
 
-    const selectedIndices = text
-      .split(',')
-      .map(s => parseInt(s.trim(), 10) - 1)
-      .filter(i => !isNaN(i) && i >= 0 && i < indexMap.length)
+    const selectedIndices = picks
+      .map(n => n - 1)
+      .filter(i => Number.isInteger(i) && i >= 0 && i < indexMap.length)
     if (selectedIndices.length === 0) {
       throw new Error(`selection reply had no usable numbers: ${JSON.stringify(text.slice(0, 120))}`)
     }

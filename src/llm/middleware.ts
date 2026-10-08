@@ -69,6 +69,8 @@ export interface ProviderRequest {
   thinking?: ThinkingMode
   /** Anthropic output_config.effort; unset uses the model's default */
   effort?: Effort
+  /** JSON schema the reply must match (Anthropic structured output), where the model supports it */
+  outputSchema?: Record<string, unknown>
 }
 
 export interface ProviderMessage {

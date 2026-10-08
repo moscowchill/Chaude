@@ -33,6 +33,20 @@ describe('Anthropic model request rules', () => {
   })
 })
 
+describe('structured output support', () => {
+  it.each([
+    ['claude-haiku-5-5', true],
+    ['claude-haiku-4-5-20251001', true],
+    ['claude-opus-5-5', true],
+    ['claude-sonnet-4-6', true],
+    ['claude-sonnet-4-5-20250929', true],
+    ['claude-sonnet-4-20250514', false],
+    ['claude-3-5-haiku-20241022', false],
+  ])('%s', (model, supported) => {
+    expect(anthropicModelRules(model).structuredOutputs).toBe(supported)
+  })
+})
+
 describe('thinking request field', () => {
   it('honors a requested mode the model supports', () => {
     expect(thinkingParam(anthropicModelRules('claude-haiku-5-5'), 'adaptive')).toEqual({ type: 'adaptive' })
