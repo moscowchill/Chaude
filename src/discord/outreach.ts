@@ -146,6 +146,8 @@ export interface OutreachDiscord {
   channels(guildId: string, name: string): Promise<OutreachChannel[]>
   /** Posts in a server channel, pinging only `mentionUserId` */
   sendToChannel(channelId: string, content: string, mentionUserId: string, nonce: string): Promise<void>
+  /** Whether a member can view a channel, so a mention there reaches them */
+  canSee(channelId: string, userId: string): Promise<boolean>
   /** Author, text, and mentioned or replied-to users of a server message, read from Discord */
   message(
     channelId: string,
@@ -347,18 +349,20 @@ export const normalizedName = (text: string) =>
   text.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]/gu, '')
 
 /**
- * The members whose names best match a loosely typed name: exact username, then exact
- * display name, then a prefix, then a part of either. Only the top rank is returned, so a
- * tie means the owner has to say which one.
+ * The members whose names best match a loosely typed name: an exact username or display
+ * name, then a prefix, then a part of either. Only the top rank is returned, so a tie
+ * (two exact matches included) means the owner has to say which one.
  */
-export function bestMatches(query: string, members: OutreachMember[]): OutreachMember[] {
+export function bestMatches(
+  query: string,
+  members: OutreachMember[]
+): { members: OutreachMember[]; exact: boolean } {
   const wanted = normalizedName(query)
-  if (!wanted) return []
+  if (!wanted) return { members: [], exact: false }
   const score = (member: OutreachMember) => {
     const username = normalizedName(member.username)
     const name = normalizedName(member.name)
-    if (username === wanted) return 4
-    if (name === wanted) return 3
+    if (username === wanted || name === wanted) return 3
     if (username.startsWith(wanted) || name.startsWith(wanted)) return 2
     if (username.includes(wanted) || name.includes(wanted)) return 1
     return 0
@@ -371,8 +375,16 @@ export function bestMatches(query: string, members: OutreachMember[]): OutreachM
     if (value > 0 && (!known || value > known.score)) ranked.set(member.id, { member, score: value })
   }
   const best = Math.max(0, ...[...ranked.values()].map((entry) => entry.score))
-  return [...ranked.values()].filter((entry) => entry.score === best).map((entry) => entry.member)
+  return {
+    members: [...ranked.values()].filter((entry) => entry.score === best).map((entry) => entry.member),
+    exact: best === 3,
+  }
 }
+
+/** "in #name" or "in <#id>" in the owner's own words; a channel named as a topic doesn't count */
+const IN_CHANNEL = /\bin\s+(<#\d{17,20}>|#[^\s,.!?]+)/i
+/** The name right after "ask" in the owner's own words, when they wrote it that way */
+const ASK_NAME = /\bask\s+@?([^\s,:;!?]+)/i
 
 const quote = (text: string) =>
   text
@@ -471,6 +483,7 @@ export class OutreachService {
   private scan?: { at: number; messages: OutreachChannelMessage[] }
   private names = new Map<string, string>()
   private timer?: ReturnType<typeof setInterval>
+  private pausedNoticeSent = false
 
   constructor(options: OutreachServiceOptions) {
     this.config = options.config
@@ -733,26 +746,36 @@ export class OutreachService {
     if (command?.action === 'none') return
     const member = typeof command?.member === 'string' ? command.member.trim().replace(/^@/, '') : ''
     const question = typeof command?.question === 'string' ? command.question.trim() : ''
-    const channel = typeof command?.channel === 'string' ? command.channel.trim().replace(/^#/, '') : ''
     // The name has to come from the owner's own words, so the model can't pick someone else
     if (command?.action !== 'ask' || !member || !question || !text.toLowerCase().includes(member.toLowerCase())) {
       await this.relay(OWNER_HELP)
       return
     }
+    // Public only when the owner wrote "in #channel": the model's channel field is never used
+    const channel = IN_CHANNEL.exec(text)?.[1]?.replace(/^#/, '') ?? ''
+    // A loose name is trusted only where the owner put it, right after "ask"; any other
+    // phrasing needs an exact username or display name
+    const asked = normalizedName(ASK_NAME.exec(text)?.[1] ?? '')
+    const loose = asked !== '' && normalizedName(member).startsWith(asked)
     try {
-      await this.relay(await this.askFromOwner(member, question, channel))
+      await this.relay(await this.askFromOwner(member, question, channel, loose))
     } catch (error) {
       logger.error({ err: error }, 'Owner request failed')
       await this.relay('That failed with an error, so nothing may have been sent. Check the bot logs.')
     }
   }
 
-  private async askFromOwner(member: string, request: string, channel: string): Promise<string> {
+  private async askFromOwner(
+    member: string,
+    request: string,
+    channel: string,
+    loose: boolean
+  ): Promise<string> {
     this.rollDay()
     if (this.state.requests >= MAX_REQUESTS_PER_DAY) {
       return `Today's limit of ${MAX_REQUESTS_PER_DAY} member questions is reached. Nothing was sent.`
     }
-    const target = await this.matchMember(member)
+    const target = await this.matchMember(member, loose)
     if (typeof target === 'string') return target
     const label = who(target.name, target.username)
     if (target.id === this.config.ownerId) return 'That is you. Nothing was sent.'
@@ -763,11 +786,14 @@ export class OutreachService {
     const found = await this.discord.channels(this.config.guildId, channel)
     if (found.length === 0) return `I can't find a #${channel} channel I can post in. Nothing was sent.`
     if (found.length > 1) return `Several channels are called #${channel}. Nothing was sent.`
+    if (!(await this.discord.canSee(found[0]!.id, target.id))) {
+      return `${label} can't see #${found[0]!.name}, so a mention there would go unseen. Nothing was sent.`
+    }
     return this.askInChannel(target, request, found[0]!)
   }
 
   /** A member from a loosely typed name, or a reply listing the candidates */
-  private async matchMember(input: string): Promise<OutreachMember | string> {
+  private async matchMember(input: string, loose: boolean): Promise<OutreachMember | string> {
     const id = /^<@!?(\d{17,20})>$/.exec(input.trim())?.[1]
     const notMember = `No member of the server matches "${input}". Nothing was sent.`
     if (id) return (await this.discord.member(this.config.guildId, id)) ?? notMember
@@ -782,14 +808,17 @@ export class OutreachService {
         isBot: message.isBot,
       })),
     ]
-    const matches = bestMatches(input, candidates)
+    const { members: matches, exact } = bestMatches(input, candidates)
     if (matches.length === 0) return notMember
+    const list = matches
+      .slice(0, 5)
+      .map((member) => who(member.name, member.username))
+      .join(', ')
     if (matches.length > 1) {
-      const list = matches
-        .slice(0, 5)
-        .map((member) => who(member.name, member.username))
-        .join(', ')
       return `Several members match "${input}": ${list}. Ask again with the exact username. Nothing was sent.`
+    }
+    if (!exact && !loose) {
+      return `"${input}" only partly matches ${list}. Ask again with the exact username. Nothing was sent.`
     }
     // A recent poster may have left since
     return (await this.discord.member(this.config.guildId, matches[0]!.id)) ?? notMember
@@ -821,7 +850,14 @@ export class OutreachService {
   private async handleReplies(messages: IncomingDirectMessage[]): Promise<void> {
     const first = messages[0]
     const last = messages[messages.length - 1]
-    if (!first || !last || !this.stateAvailable) return
+    if (!first || !last) return
+    if (!this.stateAvailable) {
+      if (first.authorId === this.config.ownerId && !this.pausedNoticeSent) {
+        this.pausedNoticeSent = true
+        await this.relay('Member outreach is paused because its saved state is unreadable or unwritable. Check the bot logs.')
+      }
+      return
+    }
     const userId = first.authorId
     const text = messages
       .map((message) => [message.content.trim(), ...message.attachments].filter(Boolean).join('\n'))

@@ -23,6 +23,8 @@ const CANNOT_MESSAGE_USER = 50007
 /** Public channels read per scan, most recently active first */
 const MAX_CHANNELS = 15
 const MESSAGE_LIMIT = 1900
+/** A full member list is fetched at most this often; discord.js keeps it cached between */
+const MEMBER_LIST_TTL_MS = 10 * 60 * 1000
 
 const toMember = (member: GuildMember): OutreachMember => ({
   id: member.id,
@@ -55,6 +57,7 @@ export function splitMessage(content: string, limit = MESSAGE_LIMIT): string[] {
 }
 
 export function createOutreachDiscord(client: Client): OutreachDiscord {
+  const memberListAt = new Map<string, number>()
   return {
     async guildName(guildId) {
       return (await client.guilds.fetch(guildId)).name
@@ -75,7 +78,11 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
       // With the Server Members intent the whole list is available, display names included;
       // without it Discord only searches username and nickname prefixes
       if (client.options.intents.has(GatewayIntentBits.GuildMembers)) {
-        return [...(await guild.members.fetch()).values()].map(toMember)
+        if (Date.now() - (memberListAt.get(guildId) ?? 0) > MEMBER_LIST_TTL_MS) {
+          await guild.members.fetch()
+          memberListAt.set(guildId, Date.now())
+        }
+        return [...guild.members.cache.values()].map(toMember)
       }
       const members = await guild.members.fetch({ query, limit: 25 })
       return [...members.values()].map(toMember)
@@ -97,6 +104,13 @@ export function createOutreachDiscord(client: Client): OutreachDiscord {
               .has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])
         )
         .map((channel) => ({ id: channel.id, name: channel.name }))
+    },
+
+    async canSee(channelId, userId) {
+      const channel = await client.channels.fetch(channelId)
+      if (!channel || channel.isDMBased()) return false
+      const member = await channel.guild.members.fetch(userId)
+      return Boolean(channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel))
     },
 
     async sendToChannel(channelId, content, mentionUserId, nonce) {
